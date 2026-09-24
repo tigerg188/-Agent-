@@ -402,7 +402,13 @@ export const AgentExecutionView: React.FC<AgentExecutionViewProps> = ({
             <div className="bg-slate-950 aspect-16/10 flex items-center justify-center relative overflow-hidden">
               {task.browserSession?.lastScreenshot ? (
                 <img
-                  src={`data:image/png;base64,${task.browserSession.lastScreenshot}`}
+                  src={
+                    task.browserSession.lastScreenshot.startsWith('data:')
+                      ? task.browserSession.lastScreenshot
+                      : task.browserSession.lastScreenshot.startsWith('PHN2Zy') || task.browserSession.lastScreenshot.startsWith('PD94bW')
+                      ? `data:image/svg+xml;base64,${task.browserSession.lastScreenshot}`
+                      : `data:image/png;base64,${task.browserSession.lastScreenshot}`
+                  }
                   alt="Browser Viewport"
                   className="w-full h-full object-contain"
                 />

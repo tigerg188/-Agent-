@@ -54,7 +54,7 @@ export interface SkillSubItem {
   name: string;
   displayName?: string;
   description: string;
-  role: 'router' | 'specialty' | 'standalone';
+  role: 'router' | 'specialty' | 'standalone' | 'subskill';
   enabled: boolean;
   category?: string;
 }
@@ -80,7 +80,7 @@ export interface SkillMetadata {
   // Hierarchical Skill Pack support
   packId?: string;
   packName?: string;
-  role?: 'router' | 'specialty' | 'standalone';
+  role?: 'router' | 'specialty' | 'standalone' | 'subskill';
   isPackMaster?: boolean;
   parentSkillId?: string;
   subSkills?: SkillSubItem[];

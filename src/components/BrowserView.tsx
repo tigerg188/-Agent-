@@ -298,7 +298,13 @@ export const BrowserView: React.FC<BrowserViewProps> = ({ workspaceId }) => {
           <div className="bg-slate-950 aspect-16/10 flex items-center justify-center relative overflow-hidden">
             {screenshot ? (
               <img
-                src={`data:image/png;base64,${screenshot}`}
+                src={
+                  screenshot.startsWith('data:')
+                    ? screenshot
+                    : screenshot.startsWith('PHN2Zy') || screenshot.startsWith('PD94bW')
+                    ? `data:image/svg+xml;base64,${screenshot}`
+                    : `data:image/png;base64,${screenshot}`
+                }
                 alt="Playwright Viewport"
                 className="w-full h-full object-contain"
               />

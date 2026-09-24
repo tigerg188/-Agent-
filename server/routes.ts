@@ -4,6 +4,11 @@ import path from 'path';
 import fs from 'fs';
 import { globalWorkspaceStore } from './workspace/store';
 import { globalSkillEngine } from './skills/engine';
+import { globalSkillProjectDiscovery } from './skills/discovery';
+import { globalSkillProjectInterpreter } from './skills/interpreter';
+import { globalEnvironmentAdapter } from './skills/environment';
+import { globalSkillProjectStore } from './skills/projectStore';
+import { ProjectDiscoveryResult } from './skills/types';
 import { globalMcpManager } from './mcp/manager';
 import { globalBrowserAdapter } from './browser/adapter';
 import { globalHistoryStore } from './history/store';
@@ -86,6 +91,118 @@ router.delete('/workspaces/:id/files/:fileId', (req: Request, res: Response) => 
   res.json({ success: true });
 });
 
+// ==================== SKILL PROJECT ROUTES (Universal Skill Runtime V0.2) ====================
+
+// List installed Skill Projects
+router.get('/skills/projects', (req: Request, res: Response) => {
+  const workspaceId = req.query.workspaceId as string | undefined;
+  const projects = globalSkillProjectStore.getAllProjects(workspaceId);
+  res.json({ success: true, data: projects });
+});
+
+// Get single project detail
+router.get('/skills/projects/:id', (req: Request, res: Response) => {
+  const project = globalSkillProjectStore.getProjectById(req.params.id);
+  if (!project) {
+    return res.status(404).json({ success: false, error: '未找到指定的 Skill 项目' });
+  }
+  res.json({ success: true, data: project });
+});
+
+// Toggle project enabled state
+router.post('/skills/projects/:id/toggle', (req: Request, res: Response) => {
+  const { enabled } = req.body;
+  const ok = globalSkillProjectStore.toggleProject(req.params.id, Boolean(enabled));
+  res.json({ success: ok });
+});
+
+// Delete / uninstall project
+router.delete('/skills/projects/:id', (req: Request, res: Response) => {
+  const ok = globalSkillProjectStore.deleteProject(req.params.id);
+  res.json({ success: ok });
+});
+
+// Pre-install Project Discovery: Scan & Interpret WITHOUT modifying files or installing
+router.post('/skills/project-discover', upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    const sourceType = (req.body.sourceType || 'github') as 'github' | 'local_folder' | 'zip';
+    const source = req.body.source || '';
+
+    let rawDiscovery;
+
+    if (req.file) {
+      rawDiscovery = await globalSkillProjectDiscovery.discoverFromZip(req.file.buffer, req.file.originalname);
+    } else if (sourceType === 'github') {
+      if (!source) {
+        return res.status(400).json({ success: false, error: '请提供有效的 GitHub 仓库地址' });
+      }
+      rawDiscovery = await globalSkillProjectDiscovery.discoverFromGithub(source);
+    } else if (sourceType === 'local_folder') {
+      if (!source) {
+        return res.status(400).json({ success: false, error: '请提供本地文件夹绝对路径' });
+      }
+      rawDiscovery = await globalSkillProjectDiscovery.discoverFromLocalFolder(source);
+    } else {
+      return res.status(400).json({ success: false, error: '不支持的项目来源类型' });
+    }
+
+    // Interpret structure without altering original files
+    const { projectMap, runtimeIntent } = globalSkillProjectInterpreter.interpret(rawDiscovery);
+
+    // Environment & Compatibility inspection
+    const envReport = await globalEnvironmentAdapter.checkEnvironment();
+    const compatibilityReport = globalEnvironmentAdapter.evaluateCompatibility(projectMap, envReport);
+
+    const discoveryResult: ProjectDiscoveryResult = {
+      projectMap,
+      runtimeIntent,
+      compatibilityReport,
+      environmentReport: envReport,
+      scannedFiles: rawDiscovery.files,
+    };
+
+    res.json({ success: true, data: discoveryResult });
+  } catch (err: any) {
+    console.error('[Discovery] Project discovery error:', err);
+    res.status(400).json({ success: false, error: `项目勘探与解析失败: ${err.message}` });
+  }
+});
+
+// Project Installation: Confirmed install with step-by-step diagnostic logs
+router.post('/skills/project-install', async (req: Request, res: Response) => {
+  try {
+    const { discoveryResult, workspaceId } = req.body;
+    if (!discoveryResult || !discoveryResult.projectMap) {
+      return res.status(400).json({ success: false, error: '缺少有效的项目勘探结果 (ProjectDiscoveryResult)' });
+    }
+
+    const { project, diagnosticLogs } = await globalSkillProjectStore.installProject(discoveryResult, workspaceId);
+
+    res.json({
+      success: true,
+      data: {
+        project,
+        diagnosticLogs,
+      },
+    });
+  } catch (err: any) {
+    console.error('[Install] Project install error:', err);
+    res.status(500).json({ success: false, error: `项目安装与入库失败: ${err.message}` });
+  }
+});
+
+// Environment inspect & repair routes
+router.get('/skills/environment', async (req: Request, res: Response) => {
+  const envReport = await globalEnvironmentAdapter.checkEnvironment();
+  res.json({ success: true, data: envReport });
+});
+
+router.post('/skills/repair-environment', async (req: Request, res: Response) => {
+  const { components } = req.body;
+  const result = await globalEnvironmentAdapter.repairEnvironment(components || []);
+  res.json({ success: true, data: result });
+});
+
 // ==================== SKILL ROUTES ====================
 router.get('/skills', (req: Request, res: Response) => {
   const workspaceId = req.query.workspaceId as string | undefined;
@@ -99,11 +216,32 @@ router.post('/skills/upload-zip', upload.single('file'), async (req: Request, re
   }
 
   const workspaceId = req.body.workspaceId;
-  const result = await globalSkillEngine.importFromZip(req.file.buffer, workspaceId);
-  if (!result.success) {
-    return res.status(400).json({ success: false, error: result.error });
+  try {
+    // Run full Discovery -> Interpreter -> Install workflow automatically for backward-compat
+    const rawDiscovery = await globalSkillProjectDiscovery.discoverFromZip(req.file.buffer, req.file.originalname);
+    const { projectMap, runtimeIntent } = globalSkillProjectInterpreter.interpret(rawDiscovery);
+    const envReport = await globalEnvironmentAdapter.checkEnvironment();
+    const compatibilityReport = globalEnvironmentAdapter.evaluateCompatibility(projectMap, envReport);
+
+    const discoveryResult: ProjectDiscoveryResult = {
+      projectMap,
+      runtimeIntent,
+      compatibilityReport,
+      environmentReport: envReport,
+      scannedFiles: rawDiscovery.files,
+    };
+
+    const { project } = await globalSkillProjectStore.installProject(discoveryResult, workspaceId);
+    const primarySkill = globalSkillEngine.getSkillById(project.projectMap.mainEntry.id);
+    res.json({ success: true, data: primarySkill, project });
+  } catch (e: any) {
+    // Fallback to legacy zip import
+    const result = await globalSkillEngine.importFromZip(req.file.buffer, workspaceId);
+    if (!result.success) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+    res.json({ success: true, data: result.skill });
   }
-  res.json({ success: true, data: result.skill });
 });
 
 router.post('/skills/upload-md', (req: Request, res: Response) => {
@@ -126,100 +264,33 @@ router.post('/skills/import-github', async (req: Request, res: Response) => {
   }
 
   try {
-    let cleanUrl = repoUrl
-      .trim()
-      .replace(/^https?:\/\/github\.com\//, '')
-      .replace(/\/$/, '');
+    // 1. Run through the new SkillProjectDiscovery & Interpreter pipeline
+    const rawDiscovery = await globalSkillProjectDiscovery.discoverFromGithub(repoUrl);
+    const { projectMap, runtimeIntent } = globalSkillProjectInterpreter.interpret(rawDiscovery);
+    const envReport = await globalEnvironmentAdapter.checkEnvironment();
+    const compatibilityReport = globalEnvironmentAdapter.evaluateCompatibility(projectMap, envReport);
 
-    const segments = cleanUrl.split('/');
-    if (segments.length < 2) {
-      return res.status(400).json({
-        success: false,
-        error: '无效的 GitHub 仓库地址，格式应为 https://github.com/owner/repo',
-      });
-    }
+    const discoveryResult: ProjectDiscoveryResult = {
+      projectMap,
+      runtimeIntent,
+      compatibilityReport,
+      environmentReport: envReport,
+      scannedFiles: rawDiscovery.files,
+    };
 
-    const owner = segments[0];
-    const repo = segments[1];
-    let branch = 'main';
-    let subpath = '';
-
-    // Handle /tree/branch/subpath or /blob/branch/subpath
-    if (segments.length >= 4 && (segments[2] === 'tree' || segments[2] === 'blob')) {
-      branch = segments[3];
-      subpath = segments.slice(4).join('/');
-    }
-
-    // 1. If subpath specified with direct SKILL.md, try fetching that file first
-    if (subpath) {
-      const fileTarget = subpath.toLowerCase().endsWith('skill.md') ? subpath : `${subpath}/SKILL.md`;
-      const directUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${fileTarget}`;
-      try {
-        const resp = await fetch(directUrl, { headers: { 'User-Agent': 'PersonalAgentWorkbench' } });
-        if (resp.ok) {
-          const content = await resp.text();
-          const result = globalSkillEngine.importFromMarkdown(content, workspaceId);
-          return res.json({ success: true, data: result.skill, count: 1 });
-        }
-      } catch (e) {}
-    }
-
-    // 2. Try fetching root SKILL.md (main and master)
-    for (const b of [branch, 'main', 'master']) {
-      const rootUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${b}/SKILL.md`;
-      try {
-        const resp = await fetch(rootUrl, { headers: { 'User-Agent': 'PersonalAgentWorkbench' } });
-        if (resp.ok) {
-          const content = await resp.text();
-          const result = globalSkillEngine.importFromMarkdown(content, workspaceId);
-          return res.json({ success: true, data: result.skill, count: 1 });
-        }
-      } catch (e) {}
-    }
-
-    // 3. Root does not contain a single SKILL.md -> It's a multi-skill pack or structured repo!
-    // Download repo archive ZIP directly and scan all skills in skills/ or subdirectories
-    let zipBuffer: Buffer | null = null;
-    const branchesToTry = [branch, 'main', 'master'];
-
-    for (const b of branchesToTry) {
-      const archiveUrl = `https://github.com/${owner}/${repo}/archive/refs/heads/${b}.zip`;
-      try {
-        const resp = await fetch(archiveUrl, {
-          headers: { 'User-Agent': 'PersonalAgentWorkbench' },
-          redirect: 'follow',
-        });
-        if (resp.ok) {
-          const arrayBuffer = await resp.arrayBuffer();
-          zipBuffer = Buffer.from(arrayBuffer);
-          break;
-        }
-      } catch (e) {}
-    }
-
-    if (!zipBuffer) {
-      return res.status(400).json({
-        success: false,
-        error: `未能从 GitHub 仓库 ${owner}/${repo} 下载到内容包，请确认仓库公开可访问。`,
-      });
-    }
-
-    // Unpack with SkillEngine
-    const zipResult = await globalSkillEngine.importFromZip(zipBuffer, workspaceId);
-    if (!zipResult.success) {
-      return res.status(400).json({
-        success: false,
-        error: `识别技能包失败：${zipResult.error}`,
-      });
-    }
+    // 2. Install project into project store
+    const { project, diagnosticLogs } = await globalSkillProjectStore.installProject(discoveryResult, workspaceId);
+    const primarySkill = globalSkillEngine.getSkillById(project.projectMap.mainEntry.id);
 
     return res.json({
       success: true,
-      data: zipResult.skill,
-      skills: zipResult.skills,
-      count: zipResult.count,
+      data: primarySkill,
+      project,
+      diagnosticLogs,
+      count: project.childSkillsCount + 1,
     });
   } catch (err: any) {
+    console.error('import-github error:', err);
     res.status(500).json({ success: false, error: `拉取与识别 GitHub Skill 异常: ${err.message}` });
   }
 });

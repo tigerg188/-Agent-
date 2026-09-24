@@ -39,7 +39,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onNavigate, activ
       badge: isRunning ? (isAwaitingApproval ? '待审批' : '运行中') : undefined,
       badgeColor: isAwaitingApproval ? 'bg-amber-500 text-white' : 'bg-blue-600 text-white animate-pulse',
     },
-    { id: 'skills', label: 'Skills', icon: Puzzle },
+    { id: 'skills', label: '技能底座 (Skills)', icon: Puzzle },
     { id: 'mcp', label: 'MCP 管理', icon: Blocks },
     { id: 'browser', label: '浏览器', icon: Globe },
     { id: 'automation', label: '自动化', icon: Clock },

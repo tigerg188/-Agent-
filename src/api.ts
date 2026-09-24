@@ -6,6 +6,10 @@ import {
   TaskRecord,
   AutomationTask,
   SystemStatus,
+  SkillProject,
+  ProjectDiscoveryResult,
+  EnvironmentReport,
+  InstallDiagnosticStep,
 } from './types';
 
 const API_BASE = '/api';
@@ -110,6 +114,92 @@ export const api = {
 
   async deleteSkill(id: string): Promise<void> {
     await fetch(`${API_BASE}/skills/${id}`, { method: 'DELETE' });
+  },
+
+  // ==================== UNIVERSAL SKILL RUNTIME (V0.2) ====================
+  async getSkillProjects(workspaceId?: string): Promise<SkillProject[]> {
+    const url = workspaceId ? `${API_BASE}/skills/projects?workspaceId=${workspaceId}` : `${API_BASE}/skills/projects`;
+    const res = await fetch(url);
+    const json = await res.json();
+    return json.data || [];
+  },
+
+  async getSkillProjectById(id: string): Promise<SkillProject> {
+    const res = await fetch(`${API_BASE}/skills/projects/${id}`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || '获取项目失败');
+    return json.data;
+  },
+
+  async toggleSkillProject(id: string, enabled: boolean): Promise<void> {
+    await fetch(`${API_BASE}/skills/projects/${id}/toggle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+  },
+
+  async deleteSkillProject(id: string): Promise<void> {
+    await fetch(`${API_BASE}/skills/projects/${id}`, { method: 'DELETE' });
+  },
+
+  async discoverSkillProject(params: {
+    sourceType: 'github' | 'local_folder' | 'zip';
+    source?: string;
+    file?: File;
+  }): Promise<ProjectDiscoveryResult> {
+    let res: Response;
+    if (params.file) {
+      const formData = new FormData();
+      formData.append('file', params.file);
+      formData.append('sourceType', 'zip');
+      res = await fetch(`${API_BASE}/skills/project-discover`, {
+        method: 'POST',
+        body: formData,
+      });
+    } else {
+      res = await fetch(`${API_BASE}/skills/project-discover`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourceType: params.sourceType,
+          source: params.source,
+        }),
+      });
+    }
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || '勘探与解析项目失败');
+    return json.data;
+  },
+
+  async installSkillProject(
+    discoveryResult: ProjectDiscoveryResult,
+    workspaceId?: string
+  ): Promise<{ project: SkillProject; diagnosticLogs: InstallDiagnosticStep[] }> {
+    const res = await fetch(`${API_BASE}/skills/project-install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ discoveryResult, workspaceId }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || '安装项目失败');
+    return json.data;
+  },
+
+  async getEnvironmentReport(): Promise<EnvironmentReport> {
+    const res = await fetch(`${API_BASE}/skills/environment`);
+    const json = await res.json();
+    return json.data;
+  },
+
+  async repairEnvironment(components: string[]): Promise<{ success: boolean; repaired: string[]; messages: string[] }> {
+    const res = await fetch(`${API_BASE}/skills/repair-environment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ components }),
+    });
+    const json = await res.json();
+    return json.data;
   },
 
   // MCP
