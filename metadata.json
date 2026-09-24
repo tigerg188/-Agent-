@@ -1,0 +1,7 @@
+{
+  "name": "Personal Agent Workbench",
+  "description": "个人智能 Agent 工作台——纯云端 Web 验证版，集成 Skill、MCP、Agent、Browser 与自动化执行引擎。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
