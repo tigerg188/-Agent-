@@ -8,10 +8,11 @@ import {
 import { globalExecutionRuntime, RuntimeExecutionOptions } from './runtime';
 import { globalExecutionTraceManager } from './execution-trace';
 import { globalArtifactBus } from './artifacts';
+import { globalSkillVerifier, VerificationReport } from './verifier';
 
 export interface OrchestrationResult {
   runId: string;
-  status: 'COMPLETED' | 'FAILED' | 'ABORTED';
+  status: 'COMPLETED' | 'FAILED' | 'ABORTED' | 'DEGRADED';
   plan: ExecutionPlan;
   steps: ExecutionStep[];
   finalReportMarkdown?: string;
@@ -19,6 +20,7 @@ export interface OrchestrationResult {
   artifactsCount: number;
   traces: ExecutionTrace[];
   tracesCount: number;
+  verification?: VerificationReport;
   durationMs?: number;
   error?: string;
 }
@@ -40,7 +42,7 @@ export class SkillOrchestrator {
     globalExecutionTraceManager.startRun(runId, plan.task, plan.projectId, plan.runId, cutoff);
 
     let finalReportMarkdown: string | undefined;
-    let runStatus: 'COMPLETED' | 'FAILED' | 'ABORTED' = 'COMPLETED';
+    let runStatus: 'COMPLETED' | 'FAILED' | 'ABORTED' | 'DEGRADED' = 'COMPLETED';
     let errorMessage: string | undefined;
 
     try {
@@ -123,6 +125,19 @@ export class SkillOrchestrator {
       globalExecutionTraceManager.finishRun(runId, runStatus, undefined, errorMessage);
     }
 
+    // Run independent verification
+    let verification: VerificationReport | undefined;
+    try {
+      verification = globalSkillVerifier.verifyRun(runId, plan, plan.task, cutoff);
+      if (runStatus === 'COMPLETED' && verification.overallStatus === 'FAILED') {
+        runStatus = 'FAILED';
+      } else if (runStatus === 'COMPLETED' && verification.overallStatus === 'DEGRADED') {
+        runStatus = 'DEGRADED';
+      }
+    } catch (verErr: any) {
+      console.warn('[SkillOrchestrator] Verification error:', verErr);
+    }
+
     const allArtifacts = globalArtifactBus.getArtifactsByRunId(runId);
     const allTraces = globalExecutionTraceManager.getTracesByRunId(runId);
     const run = globalExecutionTraceManager.getRun(runId);
@@ -140,6 +155,7 @@ export class SkillOrchestrator {
       artifactsCount: allArtifacts.length,
       traces: allTraces,
       tracesCount: allTraces.length,
+      verification,
       durationMs,
       error: errorMessage,
     };

@@ -86,19 +86,15 @@ export class SkillPlanner {
           if (searchCorpus.includes(kw)) score += 3;
         }
 
-        // Domain affinity
-        if (lowerTask.includes('人形机器人') || lowerTask.includes('机器人')) {
-          if (searchCorpus.includes('市场') || searchCorpus.includes('规模') || searchCorpus.includes('market')) score += 5;
-          if (searchCorpus.includes('技术') || searchCorpus.includes('架构') || searchCorpus.includes('tech')) score += 5;
-          if (searchCorpus.includes('供应链') || searchCorpus.includes('硬件') || searchCorpus.includes('supply')) score += 5;
-          if (searchCorpus.includes('商业') || searchCorpus.includes('场景') || searchCorpus.includes('落地') || searchCorpus.includes('投资')) score += 5;
-          if (searchCorpus.includes('竞争') || searchCorpus.includes('格局') || searchCorpus.includes('company')) score += 4;
+        // Boost if skill is explicitly listed in runtimeIntent.selectedSkills
+        if (runtimeIntent.selectedSkills?.includes(spec.name)) {
+          score += 6;
         }
 
-        // Check if runtimeIntent explicitly specifies this skill
-        const mentionsSkill = runtimeIntent.sequence?.some((seq) =>
-          seq.title.toLowerCase().includes(spec.name.toLowerCase()) ||
-          seq.action.toLowerCase().includes(spec.name.toLowerCase())
+        // Boost if skill is declared in workflow
+        const mentionsSkill = runtimeIntent.workflow?.some((wf) =>
+          wf.skillOrTool?.toLowerCase().includes(spec.name.toLowerCase()) ||
+          wf.title?.toLowerCase().includes(spec.name.toLowerCase())
         );
         if (mentionsSkill) score += 10;
 

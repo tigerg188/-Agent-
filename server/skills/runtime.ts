@@ -15,17 +15,26 @@ import { globalSkillDb } from '../database/db';
 import { defaultModelAdapter } from '../model/adapter';
 import { globalSkillEngine } from './engine';
 import { globalSkillProjectStore } from './projectStore';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 export interface RuntimeExecutionOptions {
   signal?: AbortSignal;
-  researchCutoff?: string; // Default '2026-09-24'
+  researchCutoff?: string;
   onStepProgress?: (step: ExecutionStep, message: string) => void;
   onTraceRecorded?: (trace: any) => void;
 }
 
 export class ExecutionRuntime {
-  public readonly currentDate = '2026-09-24';
-  public readonly currentYear = 2026;
+  public get currentDate(): string {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  public get currentYear(): number {
+    return new Date().getFullYear();
+  }
 
   constructor() {}
 
@@ -168,6 +177,89 @@ export class ExecutionRuntime {
           code: 'TOOL_ERROR',
           message: err.message || '浏览器检索工具执行失败',
           retryable: true,
+        },
+      };
+    }
+  }
+
+  /**
+   * Section 34: Genuine Script Execution (Python/Node/Shell)
+   * Real subprocess execution, captures stdout/stderr/exitCode, registers ScriptArtifact
+   */
+  async executeScriptAction(
+    runId: string,
+    step: ExecutionStep,
+    options: RuntimeExecutionOptions
+  ): Promise<StepExecutionResult> {
+    const startTime = Date.now();
+    const input = (step.input as any) || {};
+    const scriptPath = input.scriptPath || input.command;
+    const args = Array.isArray(input.args) ? input.args.join(' ') : '';
+
+    if (!scriptPath) {
+      return {
+        success: false,
+        error: { code: 'TOOL_ERROR', message: '未指定待执行的脚本路径或命令', retryable: false },
+      };
+    }
+
+    try {
+      const command = scriptPath.endsWith('.py')
+        ? `python3 "${scriptPath}" ${args}`
+        : scriptPath.endsWith('.js') || scriptPath.endsWith('.ts')
+        ? `node "${scriptPath}" ${args}`
+        : `${scriptPath} ${args}`;
+
+      const { stdout, stderr } = await execAsync(command, { timeout: 30000 });
+      const durationMs = Date.now() - startTime;
+
+      const scriptArtifact = globalArtifactBus.publishArtifact(runId, {
+        type: 'ScriptArtifact',
+        name: `脚本运行产物-${step.stepId}`,
+        producerStepId: step.stepId,
+        producerSkillId: step.skillId,
+        content: {
+          scriptPath,
+          command,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+          exitCode: 0,
+        },
+      });
+
+      globalExecutionTraceManager.recordTrace(runId, {
+        stepId: step.stepId,
+        action: `execute_script:${scriptPath}`,
+        tool: 'Process Sandbox',
+        input: { command, args },
+        output: { stdoutLength: stdout.length, exitCode: 0 },
+        artifactIds: [scriptArtifact.artifactId],
+        durationMs,
+        status: 'SUCCESS',
+      });
+
+      return {
+        success: true,
+        output: stdout.trim(),
+        artifactIds: [scriptArtifact.artifactId],
+      };
+    } catch (err: any) {
+      const durationMs = Date.now() - startTime;
+      globalExecutionTraceManager.recordTrace(runId, {
+        stepId: step.stepId,
+        action: `execute_script:${scriptPath}`,
+        tool: 'Process Sandbox',
+        durationMs,
+        status: 'FAILED',
+        error: err.message,
+      });
+
+      return {
+        success: false,
+        error: {
+          code: 'TOOL_ERROR',
+          message: `脚本执行失败 (退出代码非零或超时): ${err.message}`,
+          retryable: false,
         },
       };
     }
@@ -412,7 +504,7 @@ ${allEvidences.map((e) => `- [${e.dataType}] **${e.source}** (${e.dataDate || cu
 
     const durationMs = Date.now() - startTime;
 
-    // Publish Final Report Artifact
+    // Publish Final Report Artifact (Confidence left undefined until Verifier assesses it)
     const finalArtifact = globalArtifactBus.publishArtifact(runId, {
       type: 'FinalReportArtifact',
       name: `${task.slice(0, 20)}-最终研报`,
@@ -420,7 +512,6 @@ ${allEvidences.map((e) => `- [${e.dataType}] **${e.source}** (${e.dataDate || cu
       content: { markdown: reportText },
       inputArtifactIds: allArtifacts.map((a) => a.artifactId),
       evidenceIds: allEvidences.map((e) => e.evidenceId),
-      confidence: 0.98,
     });
 
     // Record Execution Trace
@@ -465,6 +556,8 @@ ${allEvidences.map((e) => `- [${e.dataType}] **${e.source}** (${e.dataDate || cu
 
     if (step.action === 'browser') {
       result = await this.executeBrowserAction(runId, step, options);
+    } else if (step.action === 'script') {
+      result = await this.executeScriptAction(runId, step, options);
     } else if (step.action === 'skill') {
       result = await this.executeSpecialtySkillAction(runId, step, options);
     } else if (step.action === 'file' || step.stepId.includes('synthesis')) {

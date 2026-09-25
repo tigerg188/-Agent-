@@ -18,48 +18,43 @@ export class RuntimeIntentBuilder {
    * Section 17: Generate task-grounded RuntimeIntent
    * Synthesizes user task, project map, entries, relationships, and tool constraints.
    */
-  build(task: string, projectMap: SkillProjectMap, researchCutoff = '2026-09-24'): RuntimeIntent {
+  build(task: string, projectMap: SkillProjectMap, researchCutoff?: string): RuntimeIntent {
     const taskLower = task.toLowerCase();
     const mainEntry = projectMap.mainEntry;
     const entries = projectMap.entries || [];
+    const systemToday = new Date().toISOString().slice(0, 10);
+    const activeCutoff = researchCutoff || systemToday;
 
-    // 1. Determine which child skills are functionally relevant to this task
+    // 1. Determine which child skills are functionally relevant to this task via semantic intersection
     const selectedSkills: string[] = [];
     if (mainEntry) {
       selectedSkills.push(mainEntry.name || projectMap.projectName);
     }
 
+    // Tokenize task for domain-agnostic relevance scoring
+    const taskTokens = taskLower
+      .replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length >= 2);
+
     for (const entry of entries) {
       if (entry.path === mainEntry?.path) continue;
-      const entryText = `${entry.name} ${entry.displayName || ''} ${entry.description || ''}`.toLowerCase();
+      const entryText = `${entry.name} ${entry.displayName || ''} ${entry.description || ''} ${(entry.triggers || []).join(' ')}`.toLowerCase();
 
-      // Check relevance heuristics
-      let isRelevant = false;
-      if (
-        (taskLower.includes('机器人') || taskLower.includes('具身') || taskLower.includes('产业') || taskLower.includes('市场')) &&
-        (entryText.includes('市场') || entryText.includes('行业') || entryText.includes('规模') || entryText.includes('market'))
-      ) {
-        isRelevant = true;
-      } else if (
-        (taskLower.includes('技术') || taskLower.includes('发展') || taskLower.includes('趋势') || taskLower.includes('架构')) &&
-        (entryText.includes('技术') || entryText.includes('路线') || entryText.includes('研发') || entryText.includes('tech'))
-      ) {
-        isRelevant = true;
-      } else if (
-        (taskLower.includes('企业') || taskLower.includes('商业') || taskLower.includes('投资') || taskLower.includes('机会') || taskLower.includes('公司')) &&
-        (entryText.includes('投资') || entryText.includes('商业') || entryText.includes('竞争') || entryText.includes('公司') || entryText.includes('产业链'))
-      ) {
-        isRelevant = true;
-      } else if (
-        taskLower.includes('供应链') || taskLower.includes('制造') || taskLower.includes('部件')
-      ) {
-        if (entryText.includes('供应链') || entryText.includes('制造') || entryText.includes('零部件')) {
-          isRelevant = true;
+      // Check relevance heuristics without any hardcoded vertical keywords
+      let matchCount = 0;
+      for (const token of taskTokens) {
+        if (entryText.includes(token)) {
+          matchCount++;
         }
       }
 
-      // If no specific match, include up to 4 primary specialty skills in project
-      if (isRelevant || selectedSkills.length < 5) {
+      // If task mentions keywords relevant to this skill, or if skill is a declared dependency
+      const isDeclaredDependency = (projectMap.relationships || []).some(
+        (rel) => rel.from === mainEntry?.id && rel.to === entry.id
+      );
+
+      if (matchCount > 0 || isDeclaredDependency || selectedSkills.length <= 3) {
         selectedSkills.push(entry.name);
       }
     }
@@ -76,9 +71,9 @@ export class RuntimeIntentBuilder {
       {
         name: 'researchCutoff',
         type: 'string',
-        description: '数据与事实有效截止日期 (默认 2026-09-24)',
+        description: `数据与事实有效截止日期 (当前系统基准: ${activeCutoff})`,
         required: false,
-        default: researchCutoff,
+        default: activeCutoff,
       },
       {
         name: 'depth',
@@ -105,7 +100,7 @@ export class RuntimeIntentBuilder {
         stepId: 'step_task_definition',
         title: '任务拆解与研究范围界定',
         skillOrTool: mainEntry?.name || 'Project Router',
-        action: '分析任务意图、划定研究标的、设立分析维度与基准时间 (2026-09-24)',
+        action: `分析任务意图、划定研究标的、设立分析维度与基准时间 (${activeCutoff})`,
         expectedOutput: '明确的开题界定与专项分析任务清单',
       },
       {
@@ -121,7 +116,7 @@ export class RuntimeIntentBuilder {
         stepId: 'step_parallel_specialty_analysis',
         title: '调度所选专项技能进行并行深度分析',
         skillOrTool: selectedSkills.filter((s) => s !== mainEntry?.name).join(' & ') || 'Specialty Skills',
-        action: '按各专项 SKILL.md 分别测算市场规模、技术瓶颈、产业链卡位与商业化机会',
+        action: '按各专项 SKILL.md 分别测算关键指标、分析瓶颈与落地机会',
         expectedOutput: '多个专项结构化产物 (Artifacts)',
         dependsOn: ['step_browser_intelligence'],
       },
@@ -130,7 +125,7 @@ export class RuntimeIntentBuilder {
         stepId: 'step_cross_validation_synthesis',
         title: '产物交叉验证与主报告交付物编译',
         skillOrTool: 'Document & Artifact Bus',
-        action: '归集各专项 Artifacts，校验证据链与时间有效性，输出完整投资级研究主报告',
+        action: '归集各专项 Artifacts，校验证据链与时间有效性，输出完整主研判报告',
         expectedOutput: '专业 Markdown 主交付报告',
         dependsOn: ['step_parallel_specialty_analysis'],
       },
