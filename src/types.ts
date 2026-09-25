@@ -416,3 +416,107 @@ export interface SystemStatus {
   skillsCount: number;
   mcpsCount: number;
 }
+
+// ==================== V0.3.2 EXECUTION RUNTIME TYPES ====================
+
+export type StepActionType = 'skill' | 'browser' | 'mcp' | 'script' | 'file' | 'model';
+export type StepExecutionStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+
+export interface ExecutionDependency {
+  stepId: string;
+  dependsOnStepId: string;
+  type: 'hard' | 'soft';
+}
+
+export interface ExecutionStep {
+  stepId: string;
+  skillId?: string;
+  skillName?: string;
+  title?: string;
+  action: StepActionType;
+  input: unknown;
+  dependsOn: string[];
+  expectedOutput?: string;
+  status: StepExecutionStatus;
+  startedAt?: string;
+  completedAt?: string;
+  output?: unknown;
+  artifactIds?: string[];
+  error?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  };
+}
+
+export interface ExecutionPlan {
+  runId: string;
+  projectId: string;
+  task: string;
+  steps: ExecutionStep[];
+  dependencies: ExecutionDependency[];
+  parallelGroups: string[][];
+  expectedArtifacts: string[];
+  createdAt: string;
+}
+
+export interface Artifact {
+  artifactId: string;
+  type: string;
+  name: string;
+  producerStepId: string;
+  producerSkillId?: string;
+  producerSkillName?: string;
+  content: unknown;
+  inputArtifactIds: string[];
+  evidenceIds: string[];
+  confidence?: number;
+  status: 'raw' | 'processed' | 'verified' | 'rejected';
+  timestamp: string;
+  metadata?: Record<string, any>;
+}
+
+export interface ExecutionRun {
+  runId: string;
+  task: string;
+  projectId: string;
+  planId: string;
+  startedAt: string;
+  finishedAt?: string;
+  status: 'PLANNED' | 'READY' | 'EXECUTING' | 'OBSERVING' | 'COMPLETED' | 'VERIFIED' | 'FAILED' | 'ABORTED';
+  researchCutoff: string;
+  error?: string;
+  summary?: string;
+}
+
+export interface ExecutionTrace {
+  traceId: string;
+  runId: string;
+  stepId: string;
+  timestamp: string;
+  action: string;
+  input?: unknown;
+  tool?: string;
+  output?: unknown;
+  artifactIds: string[];
+  durationMs?: number;
+  status: 'SUCCESS' | 'FAILED' | 'WARNING' | 'RETRYING';
+  error?: string;
+}
+
+export type EvidenceDataType = 'FACT' | 'ESTIMATE' | 'ASSUMPTION' | 'CALCULATION' | 'FORECAST' | 'OPINION';
+
+export interface EvidenceRef {
+  evidenceId: string;
+  source: string;
+  url?: string;
+  title?: string;
+  publishedAt?: string;
+  accessedAt?: string;
+  dataDate?: string;
+  claim?: string;
+  artifactId?: string;
+  dataType?: EvidenceDataType;
+  hasTemporalConflict?: boolean;
+}
+

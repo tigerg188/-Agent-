@@ -4,6 +4,13 @@ import { globalSkillEngine } from '../skills/engine';
 import { globalMcpManager } from '../mcp/manager';
 import { defaultModelAdapter } from '../model/adapter';
 import { globalWorkspaceStore } from '../workspace/store';
+import { globalSkillProjectStore } from '../skills/projectStore';
+import { globalRuntimeIntentBuilder } from '../skills/runtime-intent';
+import { globalSkillPlanner } from '../skills/planner';
+import { globalSkillOrchestrator } from '../skills/orchestrator';
+import { globalArtifactBus } from '../skills/artifacts';
+import { globalExecutionTraceManager } from '../skills/execution-trace';
+
 
 export interface ActiveTaskState {
   taskId: string;
@@ -538,15 +545,60 @@ export class AgentCore {
 
     // Invoke Gemini model adapter
     let generatedReport = '';
-    try {
-      let subSkillsContext = '';
-      if (skill && skill.subSkills && skill.subSkills.length > 0) {
-        subSkillsContext = `\n【当前总路由技能可调度的下属专项研究分支（共 ${skill.subSkills.length} 项）】：\n` +
-          skill.subSkills.map((sub: any) => `- 「${sub.displayName || sub.name}」(${sub.name}): ${sub.description}`).join('\n') +
-          `\n请以总行研分析师的统筹视角，根据任务需要有机融合上述专项方法论（如市场规模估算、产业链梳理、商业模式、竞争格局、驱动力等）展开深度系统分析。\n`;
-      }
 
-      const prompt = `
+    // Check if there is a matching SkillProject for Universal Skill Runtime DAG execution
+    let matchedProject = task.skillId ? globalSkillProjectStore.getProject(task.skillId) : null;
+    if (!matchedProject && skill?.packId) {
+      matchedProject = globalSkillProjectStore.getProject(skill.packId);
+    }
+    if (!matchedProject) {
+      const allProjects = globalSkillProjectStore.getProjects();
+      matchedProject = allProjects.find((p) =>
+        p.enabled && (
+          task.prompt.toLowerCase().includes(p.name.toLowerCase()) ||
+          task.prompt.toLowerCase().includes(p.displayName.toLowerCase()) ||
+          (p.projectMap.entries && p.projectMap.entries.some((e) => task.prompt.toLowerCase().includes(e.name.toLowerCase())))
+        )
+      ) || null;
+    }
+
+    if (matchedProject) {
+      try {
+        const runtimeIntent = globalRuntimeIntentBuilder.build(task.prompt, matchedProject.projectMap, '2026-09-24');
+        const plan = globalSkillPlanner.plan(task.prompt, runtimeIntent, matchedProject.projectMap);
+
+        const orchRes = await globalSkillOrchestrator.executePlan(plan, {
+          researchCutoff: '2026-09-24',
+          onStepProgress: (st, msg) => {
+            this.addStep(task, {
+              id: `step-dag-${st.stepId}-${Date.now()}`,
+              stage: 'tool_call',
+              title: `[DAG 执行] ${st.title || st.stepId}`,
+              description: msg,
+              timestamp: new Date().toISOString(),
+              status: st.status === 'completed' ? 'success' : st.status === 'failed' ? 'error' : 'in_progress',
+            });
+          },
+        });
+
+        if (orchRes.finalReportMarkdown) {
+          generatedReport = orchRes.finalReportMarkdown;
+        }
+      } catch (dagErr: any) {
+        console.warn('[AgentCore] DAG orchestrator error, falling back to direct synthesis:', dagErr.message);
+      }
+    }
+
+    if (!generatedReport) {
+      try {
+        let subSkillsContext = '';
+        if (skill && skill.subSkills && skill.subSkills.length > 0) {
+          subSkillsContext = `\n【当前总路由技能可调度的下属专项研究分支（共 ${skill.subSkills.length} 项）】：\n` +
+            skill.subSkills.map((sub: any) => `- 「${sub.displayName || sub.name}」(${sub.name}): ${sub.description}`).join('\n') +
+            `\n请以总行研分析师的统筹视角，根据任务需要有机融合上述专项方法论（如市场规模估算、产业链梳理、商业模式、竞争格局、驱动力等）展开深度系统分析。\n`;
+        }
+
+        const prompt = `
 你是一个专业的个人 AI Agent 工作执行器。
 当前用户任务：${task.prompt}
 
@@ -562,20 +614,20 @@ ${referenceData || '（无直接网页原文，请依据专业知识与分析逻
 3. 结尾附带简短的执行自查结论。
 `;
 
-      generatedReport = await defaultModelAdapter.generateText(prompt, {
-        modelName: task.model,
-        systemInstruction: '你是一个高效、严谨、只陈述客观事实的专业级个人 Agent 工作执行器。格式排版规范优美。',
-        temperature: 0.3,
-      });
-    } catch (e: any) {
-      console.log('[AgentCore] Model generation using context synthesis fallback...');
+        generatedReport = await defaultModelAdapter.generateText(prompt, {
+          modelName: task.model,
+          systemInstruction: '你是一个高效、严谨、只陈述客观事实的专业级个人 Agent 工作执行器。格式排版规范优美。',
+          temperature: 0.3,
+        });
+      } catch (e: any) {
+        console.log('[AgentCore] Model generation using context synthesis fallback...');
 
-      // Construct a rich structured report based on real collected facts
-      const factsSection = referenceData
-        ? `### 1. 工具抓取与前沿事实提取\n\n${referenceData}\n`
-        : `### 1. 执行事实摘要\n\n- 任务已通过 Agent 自动化流程成功执行，并调用配置的 MCP/Browser 工具链路。\n- 关联 Skill 规范：${skill ? skill.name : '通用分析流程'}\n`;
+        // Construct a rich structured report based on real collected facts
+        const factsSection = referenceData
+          ? `### 1. 工具抓取与前沿事实提取\n\n${referenceData}\n`
+          : `### 1. 执行事实摘要\n\n- 任务已通过 Agent 自动化流程成功执行，并调用配置的 MCP/Browser 工具链路。\n- 关联 Skill 规范：${skill ? skill.name : '通用分析流程'}\n`;
 
-      generatedReport = `# 执行分析成果报告：${task.title}
+        generatedReport = `# 执行分析成果报告：${task.title}
 
 > 任务提示词：${task.prompt}  
 > 执行工作区：${task.workspaceId} · 接入 Skill：${skill ? skill.name : '标准工作流'}
@@ -602,7 +654,9 @@ ${factsSection}
 1. 可将当前成果纳入工作区持续知识库；
 2. 若需进一步细化特定子领域，可触发下一步自动化巡检任务。
 `;
+      }
     }
+
 
     // Save report to disk via MCP
     const safeTitle = (task.title || 'Task-Report').replace(/[/\\?%*:|"<>]/g, '-').slice(0, 30);

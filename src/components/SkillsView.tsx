@@ -33,6 +33,9 @@ import {
   AlertTriangle,
   FolderGit2,
   HardDrive,
+  Database,
+  Clock,
+  Activity,
 } from 'lucide-react';
 import {
   SkillMetadata,
@@ -57,7 +60,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
   onRefresh,
   onRunSkill,
 }) => {
-  const [activeTab, setActiveTab] = useState<'projects' | 'discovery' | 'environment' | 'flat'>('projects');
+  const [activeTab, setActiveTab] = useState<'projects' | 'discovery' | 'environment' | 'runtime' | 'flat'>('projects');
 
   // Installed Skill Projects
   const [projects, setProjects] = useState<SkillProject[]>([]);
@@ -67,6 +70,22 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
   const [envReport, setEnvReport] = useState<EnvironmentReport | null>(null);
   const [isCheckingEnv, setIsCheckingEnv] = useState(false);
   const [isRepairingEnv, setIsRepairingEnv] = useState(false);
+
+  // Universal Skill Runtime (V0.3.1 ~ V0.3.2) State
+  const [runtimeRuns, setRuntimeRuns] = useState<any[]>([]);
+  const [selectedRunDetail, setSelectedRunDetail] = useState<any | null>(null);
+  const [plannerTask, setPlannerTask] = useState(
+    '分析研究未来5年全球人形机器人发展趋势，重点输出市场规模预测、技术路线与核心瓶颈、产业链卡位与核心企业动态，以及适合大型产业投资开发企业的商业机会与实施路径建议。'
+  );
+  const [selectedProjectForRun, setSelectedProjectForRun] = useState<string>('');
+  const [researchCutoff, setResearchCutoff] = useState('2026-09-24');
+  const [plannedPlan, setPlannedPlan] = useState<any | null>(null);
+  const [isPlanning, setIsPlanning] = useState(false);
+  const [isExecutingPlan, setIsExecutingPlan] = useState(false);
+  const [runtimeExecutionResult, setRuntimeExecutionResult] = useState<any | null>(null);
+  const [traceDetailModal, setTraceDetailModal] = useState<any | null>(null);
+  const [runtimeProfile, setRuntimeProfile] = useState<any | null>(null);
+
 
   // Discovery input states
   const [discoverySourceType, setDiscoverySourceType] = useState<'github' | 'local_folder' | 'zip'>('github');
@@ -98,7 +117,83 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
   useEffect(() => {
     loadProjects();
     loadEnvironment();
+    loadRuntimeData();
   }, [workspaceId]);
+
+  const loadRuntimeData = async () => {
+    try {
+      const [runs, profile] = await Promise.all([
+        api.getRuntimeRuns().catch(() => []),
+        api.getRuntimeProfile().catch(() => null),
+      ]);
+      setRuntimeRuns(runs);
+      setRuntimeProfile(profile);
+    } catch (e) {
+      console.warn('Failed to load runtime data', e);
+    }
+  };
+
+  const handleGeneratePlan = async () => {
+    if (!plannerTask.trim()) {
+      setErrorMessage('请输入研究分析任务或 Prompt');
+      return;
+    }
+    setIsPlanning(true);
+    setErrorMessage(null);
+    try {
+      const res = await api.createRuntimePlan(
+        plannerTask,
+        selectedProjectForRun || (projects[0]?.id),
+        researchCutoff
+      );
+      setPlannedPlan(res.plan);
+      setSuccessMessage(`DAG 规划生成成功！共 ${res.plan.steps.length} 个执行步骤，${res.plan.parallelGroups?.length || 1} 批次并行拓扑。`);
+    } catch (e: any) {
+      setErrorMessage(e.message || '生成 DAG 规划失败');
+    } finally {
+      setIsPlanning(false);
+    }
+  };
+
+  const handleExecutePlan = async () => {
+    if (!plannedPlan) {
+      setErrorMessage('请先生成 DAG 拓扑执行计划');
+      return;
+    }
+    setIsExecutingPlan(true);
+    setErrorMessage(null);
+    try {
+      const res = await api.executeRuntimePlan(plannedPlan, researchCutoff);
+      setRuntimeExecutionResult(res);
+      setSuccessMessage(`DAG 编排执行完成！状态：${res.status}，产出 ${res.artifacts?.length || 0} 个结构化产物，记录 ${res.tracesCount || 0} 条工具执行证据。`);
+      await loadRuntimeData();
+      if (res.runId) {
+        handleInspectRun(res.runId);
+      }
+    } catch (e: any) {
+      setErrorMessage(e.message || 'DAG 编排执行失败');
+    } finally {
+      setIsExecutingPlan(false);
+    }
+  };
+
+  const handleInspectRun = async (runId: string) => {
+    try {
+      const detail = await api.getRuntimeRun(runId);
+      setSelectedRunDetail(detail);
+    } catch (e: any) {
+      setErrorMessage('获取运行详细记录失败: ' + e.message);
+    }
+  };
+
+  const handleTraceArtifact = async (artifactId: string) => {
+    try {
+      const trace = await api.traceArtifact(artifactId);
+      setTraceDetailModal(trace);
+    } catch (e: any) {
+      setErrorMessage('产物溯源失败: ' + e.message);
+    }
+  };
 
   const loadProjects = async () => {
     setIsLoadingProjects(true);
@@ -262,13 +357,13 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
             <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
               <span>通用智能技能执行底座</span>
               <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/20 border border-blue-400/30 text-blue-300 font-mono">
-                V0.2 Runtime
+                V0.3.2 Heterogeneous Runtime
               </span>
             </h1>
           </div>
           <p className="text-xs text-slate-300 max-w-2xl leading-relaxed">
             核心原则：<span className="text-blue-400 font-semibold">任何Skill，先理解；任何环境，先适配；任何任务，先验证。</span>{' '}
-            不强制修改第三方原项目，保持文件原貌，通过智能勘探构建运行时意图 (Runtime Intent) 与拓扑映射。
+            建立 Skill Project Map → Runtime Intent → Execution Plan → DAG Orchestration → Artifact Bus 完整执行链路。
           </p>
         </div>
 
@@ -306,6 +401,17 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
           >
             <Cpu className="w-4 h-4 text-emerald-400" />
             <span>底座执行环境</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('runtime')}
+            className={`px-3 py-1.5 rounded-xl font-medium transition-all flex items-center gap-1.5 ${
+              activeTab === 'runtime'
+                ? 'bg-blue-600 text-white shadow-sm font-semibold'
+                : 'text-slate-300 hover:text-white'
+            }`}
+          >
+            <GitBranch className="w-4 h-4 text-purple-400" />
+            <span>DAG 编排与产物总线</span>
           </button>
           <button
             onClick={() => setActiveTab('flat')}
@@ -803,6 +909,512 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                     </div>
                   );
                 })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ==================== TAB: DAG RUNTIME & ARTIFACT BUS (V0.3.1 ~ V0.3.2) ==================== */}
+      {activeTab === 'runtime' && (
+        <div className="space-y-6">
+          {/* Top Status Banner */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs space-y-1">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
+                <Clock className="w-4 h-4 text-blue-500" />
+                <span>时间基准 (Cutoff)</span>
+              </div>
+              <div className="text-sm font-bold text-slate-900 font-mono">2026-09-24</div>
+              <p className="text-2xs text-slate-400">所有研究任务强制注入系统当前日期</p>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs space-y-1">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
+                <GitBranch className="w-4 h-4 text-purple-500" />
+                <span>编排架构</span>
+              </div>
+              <div className="text-sm font-bold text-slate-900">DAG + Artifact Bus</div>
+              <p className="text-2xs text-slate-400">支持拓扑排序与并行批次调度</p>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs space-y-1">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
+                <Database className="w-4 h-4 text-emerald-500" />
+                <span>持久化底层</span>
+              </div>
+              <div className="text-sm font-bold text-slate-900">Node SQLite 底座</div>
+              <p className="text-2xs text-slate-400">执行记录、产物与证据全链持久化</p>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs space-y-1">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
+                <Activity className="w-4 h-4 text-amber-500" />
+                <span>历史执行 Runs</span>
+              </div>
+              <div className="text-sm font-bold text-slate-900 font-mono">{runtimeRuns.length} 次运行</div>
+              <p className="text-2xs text-slate-400">记录完整事实追溯与执行审计</p>
+            </div>
+          </div>
+
+          {/* Interactive DAG Planner & Execution Box */}
+          <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-xs space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-purple-600" />
+                  <span>DAG 任务规划器与即时执行 (Golden Test)</span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  输入任务 Prompt，调度异构技能项目生成有向无环图 (DAG)，通过真实 Browser 与 Skill 节点分发产物。
+                </p>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5 text-xs text-slate-600">
+                  <span className="font-semibold">标的技能包：</span>
+                  <select
+                    value={selectedProjectForRun}
+                    onChange={(e) => setSelectedProjectForRun(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-xl border border-slate-200 text-xs bg-slate-50 font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    {projects.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.displayName || p.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-xs text-slate-600">
+                  <span className="font-semibold">基准日期：</span>
+                  <input
+                    type="text"
+                    value={researchCutoff}
+                    onChange={(e) => setResearchCutoff(e.target.value)}
+                    className="w-24 px-2.5 py-1.5 rounded-xl border border-slate-200 text-xs font-mono bg-slate-50 text-slate-800 text-center"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Task Prompt Area */}
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-700">研究分析任务 Prompt：</label>
+              <textarea
+                value={plannerTask}
+                onChange={(e) => setPlannerTask(e.target.value)}
+                rows={3}
+                className="w-full p-3.5 rounded-2xl border border-slate-200 text-xs leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-500 bg-slate-50/50"
+                placeholder="输入完整的深度研究任务..."
+              />
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex items-center justify-between pt-2">
+              <div className="text-2xs text-slate-400">
+                支持并行执行：信息检索 → 细分分析 (市场/技术/竞争/商业) → 产物汇聚与交叉检验 → 成果撰写
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleGeneratePlan}
+                  disabled={isPlanning || isExecutingPlan}
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50"
+                >
+                  {isPlanning ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>规划生成中...</span>
+                    </>
+                  ) : (
+                    <>
+                      <GitBranch className="w-3.5 h-3.5 text-purple-600" />
+                      <span>1. 生成 DAG 拓扑规划</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  onClick={handleExecutePlan}
+                  disabled={!plannedPlan || isExecutingPlan}
+                  className="px-5 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all disabled:opacity-50"
+                >
+                  {isExecutingPlan ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>DAG 编排执行中...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-3.5 h-3.5" />
+                      <span>2. 真实执行 DAG 编排</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Planned Plan Steps Preview */}
+            {plannedPlan && (
+              <div className="pt-4 border-t border-slate-100 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-bold text-slate-800 flex items-center gap-2">
+                    <span>DAG 执行计划已就绪</span>
+                    <span className="px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 text-2xs font-mono font-semibold">
+                      {plannedPlan.steps.length} 个步骤 · {plannedPlan.parallelGroups?.length || 1} 层拓扑批次
+                    </span>
+                  </div>
+                  <span className="text-2xs text-slate-400 font-mono">Plan ID: {plannedPlan.planId}</span>
+                </div>
+
+                <div className="space-y-2">
+                  {plannedPlan.steps.map((st: any, idx: number) => {
+                    return (
+                      <div
+                        key={st.stepId}
+                        className="p-3 rounded-2xl border border-slate-200 bg-slate-50/60 flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className="w-6 h-6 rounded-lg bg-slate-200 text-slate-700 font-bold font-mono text-2xs flex items-center justify-center">
+                            {idx + 1}
+                          </span>
+                          <div>
+                            <div className="font-bold text-slate-800 flex items-center gap-2">
+                              <span>{st.title || st.stepId}</span>
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-2xs font-semibold ${
+                                  st.action === 'browser'
+                                    ? 'bg-blue-100 text-blue-700'
+                                    : st.action === 'skill'
+                                    ? 'bg-purple-100 text-purple-700'
+                                    : 'bg-emerald-100 text-emerald-700'
+                                }`}
+                              >
+                                {st.action}
+                              </span>
+                              {st.skillName && (
+                                <span className="text-2xs text-slate-500 font-normal">
+                                  [{st.skillName}]
+                                </span>
+                              )}
+                            </div>
+                            {st.dependsOn && st.dependsOn.length > 0 && (
+                              <div className="text-2xs text-slate-400 mt-0.5 font-mono">
+                                依赖步骤: {st.dependsOn.join(', ')}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="text-2xs font-semibold text-slate-500">
+                          {st.status || 'pending'}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Execution Result Banner / Synthesis Preview */}
+          {runtimeExecutionResult && (
+            <div className="bg-white rounded-3xl border border-purple-200 p-6 shadow-sm space-y-5">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                    <h3 className="text-sm font-bold text-slate-900">
+                      DAG 编排执行成果已生成 (Run ID: {runtimeExecutionResult.runId})
+                    </h3>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    耗时：{runtimeExecutionResult.durationMs ? `${(runtimeExecutionResult.durationMs / 1000).toFixed(1)}s` : '完成'} · 产生产物：{runtimeExecutionResult.artifacts?.length || 0} 项 · 执行记录：{runtimeExecutionResult.tracesCount || 0} 条
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      if (runtimeExecutionResult.finalReportMarkdown) {
+                        navigator.clipboard.writeText(runtimeExecutionResult.finalReportMarkdown);
+                        setSuccessMessage('报告 Markdown 已复制到剪贴板！');
+                      }
+                    }}
+                    className="px-3.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 transition-all"
+                  >
+                    复制报告 Markdown
+                  </button>
+                </div>
+              </div>
+
+              {/* Artifacts List */}
+              {runtimeExecutionResult.artifacts && runtimeExecutionResult.artifacts.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Database className="w-3.5 h-3.5 text-blue-600" />
+                    <span>产物总线 (Artifact Bus) 注册清单：</span>
+                  </h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {runtimeExecutionResult.artifacts.map((art: any) => (
+                      <div
+                        key={art.id}
+                        className="p-3.5 rounded-2xl border border-slate-200 bg-slate-50/70 flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="space-y-0.5">
+                          <div className="font-bold text-slate-800 flex items-center gap-1.5">
+                            <span>{art.name}</span>
+                            <span className="text-2xs font-mono text-slate-400">({art.type})</span>
+                          </div>
+                          <div className="text-2xs text-slate-500 font-mono">
+                            来自步骤: {art.stepId} · 大小: {art.size} 字节 · 证据数: {art.evidenceCount || 0}
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => handleTraceArtifact(art.id)}
+                          className="px-2.5 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 text-2xs font-semibold shrink-0"
+                        >
+                          产物溯源
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Final Synthesis Report Markdown Box */}
+              {runtimeExecutionResult.finalReportMarkdown && (
+                <div className="space-y-2 pt-2">
+                  <h4 className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <FileText className="w-3.5 h-3.5 text-purple-600" />
+                    <span>最终综合研究报告内容：</span>
+                  </h4>
+                  <div className="p-4 rounded-2xl bg-slate-900 text-slate-200 text-xs font-mono leading-relaxed max-h-96 overflow-y-auto whitespace-pre-wrap selection:bg-purple-500 selection:text-white">
+                    {runtimeExecutionResult.finalReportMarkdown}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Historical Runs Ledger */}
+          <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-xs space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-emerald-600" />
+                  <span>Execution Runs 运行流水台账 ({runtimeRuns.length})</span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  所有通过 Universal Skill Runtime 执行的任务均在此永久归档，支持全链路审计与事实溯源。
+                </p>
+              </div>
+
+              <button
+                onClick={loadRuntimeData}
+                className="px-3 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-600 flex items-center gap-1.5"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>刷新台账</span>
+              </button>
+            </div>
+
+            {runtimeRuns.length === 0 ? (
+              <div className="py-10 text-center text-slate-400 text-xs">
+                暂无历史执行记录。在上方输入 Prompt 点击「2. 真实执行 DAG 编排」即可启动首次运行。
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {runtimeRuns.map((r: any) => (
+                  <div
+                    key={r.runId}
+                    className="p-4 rounded-2xl border border-slate-200 hover:border-slate-300 transition-all flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`w-2 h-2 rounded-full ${
+                            r.status === 'completed'
+                              ? 'bg-emerald-500'
+                              : r.status === 'failed'
+                              ? 'bg-rose-500'
+                              : 'bg-amber-500'
+                          }`}
+                        />
+                        <span className="font-bold text-slate-800">{r.task.slice(0, 60)}...</span>
+                        <span className="text-2xs font-mono px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                          {r.status}
+                        </span>
+                      </div>
+                      <div className="text-2xs text-slate-400 flex items-center gap-3 font-mono">
+                        <span>Run ID: {r.runId}</span>
+                        <span>启动: {new Date(r.startedAt).toLocaleString('zh-CN')}</span>
+                        {r.durationMs && <span>耗时: {(r.durationMs / 1000).toFixed(1)}s</span>}
+                        <span>截止基准: {r.researchCutoff}</span>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => handleInspectRun(r.runId)}
+                      className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold shrink-0"
+                    >
+                      查看审计详情
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Inspect Run Detail Modal */}
+          {selectedRunDetail && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+              <div className="bg-white rounded-3xl max-w-4xl w-full max-h-[85vh] flex flex-col shadow-2xl border border-slate-200">
+                <div className="flex items-center justify-between p-6 border-b border-slate-100">
+                  <div className="space-y-1">
+                    <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <FileText className="w-4 h-4 text-purple-600" />
+                      <span>执行审计详情 (Run ID: {selectedRunDetail.run.runId})</span>
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      任务：{selectedRunDetail.run.task}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setSelectedRunDetail(null)}
+                    className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="p-6 overflow-y-auto flex-1 space-y-5 text-xs">
+                  {/* Traces */}
+                  <div className="space-y-2">
+                    <h4 className="font-bold text-slate-800 flex items-center gap-2">
+                      <Activity className="w-3.5 h-3.5 text-blue-600" />
+                      <span>真实工具与动作执行轨迹 (Execution Traces)</span>
+                    </h4>
+                    <div className="space-y-1.5">
+                      {selectedRunDetail.traces.map((tr: any) => (
+                        <div
+                          key={tr.traceId}
+                          className="p-3 rounded-xl border border-slate-200 bg-slate-50 font-mono text-2xs space-y-1"
+                        >
+                          <div className="flex items-center justify-between text-slate-700">
+                            <span className="font-bold text-slate-900">
+                              [{tr.actionType}] {tr.toolName || tr.skillName || 'Action'}
+                            </span>
+                            <span className="text-slate-400">{tr.durationMs}ms</span>
+                          </div>
+                          {tr.inputSnippet && (
+                            <div className="text-slate-500 truncate">输入: {tr.inputSnippet}</div>
+                          )}
+                          {tr.outputSnippet && (
+                            <div className="text-emerald-700 truncate">输出: {tr.outputSnippet}</div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Artifacts */}
+                  <div className="space-y-2">
+                    <h4 className="font-bold text-slate-800 flex items-center gap-2">
+                      <Database className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>产生的结构化产物 ({selectedRunDetail.artifacts.length})</span>
+                    </h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {selectedRunDetail.artifacts.map((a: any) => (
+                        <div
+                          key={a.id}
+                          className="p-3 rounded-xl border border-slate-200 bg-white flex items-center justify-between"
+                        >
+                          <div>
+                            <div className="font-bold text-slate-800">{a.name}</div>
+                            <div className="text-2xs text-slate-400 font-mono">
+                              {a.type} · {a.size} 字节 · 步骤: {a.stepId}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handleTraceArtifact(a.id)}
+                            className="px-2 py-1 rounded bg-blue-50 text-blue-700 text-2xs font-semibold"
+                          >
+                            溯源
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Evidence References */}
+                  {selectedRunDetail.evidence && selectedRunDetail.evidence.length > 0 && (
+                    <div className="space-y-2">
+                      <h4 className="font-bold text-slate-800 flex items-center gap-2">
+                        <Shield className="w-3.5 h-3.5 text-amber-600" />
+                        <span>真实证据引用链 (Evidence References)</span>
+                      </h4>
+                      <div className="space-y-1.5">
+                        {selectedRunDetail.evidence.map((ev: any) => (
+                          <div
+                            key={ev.id}
+                            className="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-1 text-2xs"
+                          >
+                            <div className="flex items-center justify-between font-mono">
+                              <span className="font-bold text-slate-800">{ev.sourceTitle || ev.sourceUrl}</span>
+                              <span className="text-slate-400">{ev.sourceType}</span>
+                            </div>
+                            {ev.excerpt && <p className="text-slate-600 leading-relaxed">{ev.excerpt}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Trace Detail Modal */}
+          {traceDetailModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+              <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-4 text-xs">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <h3 className="font-bold text-slate-900 flex items-center gap-2">
+                    <Database className="w-4 h-4 text-blue-600" />
+                    <span>产物完整溯源：{traceDetailModal.artifact?.name}</span>
+                  </h3>
+                  <button
+                    onClick={() => setTraceDetailModal(null)}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 font-mono text-2xs space-y-1">
+                    <div>产物 ID: {traceDetailModal.artifact?.id}</div>
+                    <div>生成步骤: {traceDetailModal.artifact?.stepId}</div>
+                    <div>生成时间: {traceDetailModal.artifact?.createdAt}</div>
+                    <div>直接上游产物: {traceDetailModal.upstreamArtifacts?.length || 0} 项</div>
+                    <div>关联一手证据: {traceDetailModal.evidenceRefs?.length || 0} 项</div>
+                  </div>
+
+                  {traceDetailModal.evidenceRefs && traceDetailModal.evidenceRefs.length > 0 && (
+                    <div className="space-y-1.5">
+                      <div className="font-bold text-slate-700 text-2xs">支持证据来源：</div>
+                      {traceDetailModal.evidenceRefs.map((ev: any) => (
+                        <div key={ev.id} className="p-2.5 rounded-lg border border-slate-200 text-2xs space-y-0.5">
+                          <div className="font-semibold text-blue-600 truncate">{ev.sourceUrl || ev.sourceTitle}</div>
+                          <div className="text-slate-500 line-clamp-2">{ev.excerpt}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}

@@ -1,11 +1,22 @@
 import path from 'path';
+import crypto from 'crypto';
 import { RawProjectDiscovery } from './discovery';
 import {
   SkillProjectMap,
-  RuntimeIntent,
+  SkillProjectType,
+  SkillEntry,
+  SkillRelationship,
+  EntryCandidate,
+  ScriptInfo,
+  ResourceInfo,
+  DependencyInfo,
+  EnvironmentRequirement,
+  ToolRequirement,
+  CompatibilityProfile,
   RelationshipGraph,
   RelationshipNode,
   RelationshipEdge,
+  RuntimeIntent,
 } from './types';
 
 export class SkillProjectInterpreter {
@@ -41,14 +52,158 @@ export class SkillProjectInterpreter {
     return { frontmatter, body };
   }
 
+  private extractTitleFromMarkdown(md: string): string | null {
+    const lines = md.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('# ')) {
+        return trimmed.slice(2).trim();
+      }
+    }
+    return null;
+  }
+
+  private extractSummaryFromMarkdown(md: string): string | null {
+    const lines = md.split('\n');
+    let titlePassed = false;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('#')) {
+        titlePassed = true;
+        continue;
+      }
+      if (titlePassed && trimmed.length > 15 && !trimmed.startsWith('```') && !trimmed.startsWith('>')) {
+        return trimmed.slice(0, 160);
+      }
+    }
+    return null;
+  }
+
+  private generateStableSkillId(filePath: string): string {
+    const hash = crypto.createHash('sha256').update(filePath.toLowerCase().trim()).digest('hex');
+    return `skill_${hash.slice(0, 12)}`;
+  }
+
   /**
-   * Interpret a raw project discovery into a structured SkillProjectMap and RuntimeIntent
+   * Section 14: Graph Validation & Cycle Detection
+   */
+  private validateAndAnalyzeGraph(nodes: RelationshipNode[], edges: RelationshipEdge[]): {
+    cleanEdges: RelationshipEdge[];
+    hasCycle: boolean;
+    cycleNodes: string[];
+    topologicalOrder: string[];
+  } {
+    // 1. Remove duplicate edges & self references
+    const cleanEdges: RelationshipEdge[] = [];
+    const edgeKeySet = new Set<string>();
+
+    for (const edge of edges) {
+      if (edge.from === edge.to) {
+        continue; // Discard self-reference
+      }
+      const key = `${edge.from}->${edge.to}:${edge.type}`;
+      if (!edgeKeySet.has(key)) {
+        edgeKeySet.add(key);
+        cleanEdges.push(edge);
+      }
+    }
+
+    // 2. Build adjacency list for dependency tracking
+    const adj = new Map<string, string[]>();
+    const inDegree = new Map<string, number>();
+
+    for (const node of nodes) {
+      adj.set(node.id, []);
+      inDegree.set(node.id, 0);
+    }
+
+    for (const edge of cleanEdges) {
+      if (!adj.has(edge.from)) adj.set(edge.from, []);
+      if (!inDegree.has(edge.to)) inDegree.set(edge.to, 0);
+
+      adj.get(edge.from)!.push(edge.to);
+      inDegree.set(edge.to, (inDegree.get(edge.to) || 0) + 1);
+    }
+
+    // 3. Cycle Detection using DFS
+    const visited = new Map<string, number>(); // 0: unvisited, 1: visiting, 2: visited
+    let hasCycle = false;
+    const cycleNodes: string[] = [];
+
+    const dfs = (nodeId: string, path: string[]) => {
+      visited.set(nodeId, 1);
+      const neighbors = adj.get(nodeId) || [];
+
+      for (const n of neighbors) {
+        const state = visited.get(n) || 0;
+        if (state === 1) {
+          hasCycle = true;
+          const cycleStart = path.indexOf(n);
+          if (cycleStart !== -1) {
+            cycleNodes.push(...path.slice(cycleStart), n);
+          } else {
+            cycleNodes.push(nodeId, n);
+          }
+        } else if (state === 0) {
+          dfs(n, [...path, n]);
+        }
+      }
+      visited.set(nodeId, 2);
+    };
+
+    for (const node of nodes) {
+      if ((visited.get(node.id) || 0) === 0) {
+        dfs(node.id, [node.id]);
+      }
+    }
+
+    // 4. Topological Sort (Kahn's algorithm)
+    const topologicalOrder: string[] = [];
+    const inDegCopy = new Map(inDegree);
+    const queue: string[] = [];
+
+    for (const [id, deg] of inDegCopy.entries()) {
+      if (deg === 0) queue.push(id);
+    }
+
+    while (queue.length > 0) {
+      const u = queue.shift()!;
+      topologicalOrder.push(u);
+
+      for (const v of adj.get(u) || []) {
+        inDegCopy.set(v, inDegCopy.get(v)! - 1);
+        if (inDegCopy.get(v) === 0) {
+          queue.push(v);
+        }
+      }
+    }
+
+    return {
+      cleanEdges,
+      hasCycle,
+      cycleNodes: Array.from(new Set(cycleNodes)),
+      topologicalOrder,
+    };
+  }
+
+  /**
+   * Main Interpret entrypoint
    */
   interpret(raw: RawProjectDiscovery): {
     projectMap: SkillProjectMap;
     runtimeIntent: RuntimeIntent;
   } {
-    const { files, manifests, readmeContent, rootSkillMdContent, allSkillMds, inferredProjectName } = raw;
+    const {
+      files,
+      manifests,
+      readmeContent,
+      rootSkillMdContent,
+      allSkillMds,
+      inferredProjectName,
+      entryCandidates,
+      sourceType,
+      sourceUrl,
+    } = raw;
 
     // 1. Identify primary manifest if any
     let packManifest: any = null;
@@ -77,55 +232,35 @@ export class SkillProjectInterpreter {
       packManifest?.description ||
       (readmeContent ? this.extractSummaryFromMarkdown(readmeContent) : null) ||
       (rootSkillMdContent ? this.extractSummaryFromMarkdown(rootSkillMdContent) : null) ||
-      `${projectDisplayName} 技能项目`;
+      `${projectDisplayName} 异构技能项目`;
 
     // 3. Collect Supporting Resources
-    const references: Array<{ path: string; size: number; name: string }> = [];
-    const templates: Array<{ path: string; size: number; name: string }> = [];
-    const examples: Array<{ path: string; size: number; name: string }> = [];
-    const scripts: Array<{ path: string; size: number; name: string; runtime: string }> = [];
-    const configs: Array<{ path: string; size: number; name: string }> = [];
+    const references: ResourceInfo[] = [];
+    const templates: ResourceInfo[] = [];
+    const examples: ResourceInfo[] = [];
+    const scripts: ScriptInfo[] = [];
+    const configs: ResourceInfo[] = [];
 
     for (const file of files) {
       const lower = file.path.toLowerCase();
       const base = path.basename(file.path);
 
       if (lower.includes('/references/') || lower.startsWith('references/')) {
-        references.push({ path: file.path, size: file.size, name: base });
+        references.push({ path: file.path, size: file.size, name: base, type: 'reference' });
       } else if (lower.includes('/templates/') || lower.startsWith('templates/')) {
-        templates.push({ path: file.path, size: file.size, name: base });
+        templates.push({ path: file.path, size: file.size, name: base, type: 'template' });
       } else if (lower.includes('/examples/') || lower.startsWith('examples/')) {
-        examples.push({ path: file.path, size: file.size, name: base });
-      } else if (lower.includes('/scripts/') || lower.startsWith('scripts/') || lower.endsWith('.py') || lower.endsWith('.sh')) {
+        examples.push({ path: file.path, size: file.size, name: base, type: 'example' });
+      } else if (lower.includes('/scripts/') || lower.startsWith('scripts/') || lower.endsWith('.py') || lower.endsWith('.sh') || lower.endsWith('.js')) {
         const runtime = lower.endsWith('.py') ? 'python' : lower.endsWith('.sh') ? 'bash' : 'node';
         scripts.push({ path: file.path, size: file.size, name: base, runtime });
-      } else if (
-        lower.endsWith('.json') ||
-        lower.endsWith('.yaml') ||
-        lower.endsWith('.yml') ||
-        lower.endsWith('.toml') ||
-        lower.includes('config') ||
-        base.startsWith('.env')
-      ) {
-        configs.push({ path: file.path, size: file.size, name: base });
+      } else if (lower.endsWith('.json') || lower.endsWith('.yaml') || lower.endsWith('.toml')) {
+        configs.push({ path: file.path, size: file.size, name: base, type: 'config' });
       }
     }
 
-    // 4. Parse all discovered SKILL.md entries
-    interface ParsedSkillInfo {
-      id: string;
-      name: string;
-      displayName: string;
-      description: string;
-      path: string;
-      category?: string;
-      role: 'router' | 'specialty' | 'subskill' | 'standalone';
-      content: string;
-      contentPreview: string;
-    }
-
-    const parsedSkills: ParsedSkillInfo[] = [];
-
+    // 4. Parse all Skill Entries with Stable IDs
+    const parsedEntries: SkillEntry[] = [];
     for (const item of allSkillMds) {
       const { frontmatter, body } = this.parseFrontmatter(item.content);
       const dirOfSkill = path.dirname(item.path);
@@ -135,100 +270,74 @@ export class SkillProjectInterpreter {
       const displayName = frontmatter.displayName || frontmatter.title || name;
       const description = frontmatter.description
         ? String(frontmatter.description).trim()
-        : this.extractSummaryFromMarkdown(body) || `${displayName} 执行规范`;
-      const id = name.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-      const category = frontmatter.category || (allSkillMds.length > 1 ? '专项研究' : '通用技能');
+        : this.extractSummaryFromMarkdown(body) || `${displayName} 专业规范`;
+      const id = this.generateStableSkillId(item.path);
+      const category = frontmatter.category || (allSkillMds.length > 1 ? '专项分析' : '通用技能');
 
-      parsedSkills.push({
+      parsedEntries.push({
         id,
         name,
         displayName,
         description,
         path: item.path,
+        type: 'skill',
         category,
-        role: 'standalone',
+        role: 'subskill',
         content: item.content,
         contentPreview: item.content.slice(0, 500),
       });
     }
 
-    // 5. Identify Main Entry vs Child Skills
-    let entrySkillName = packManifest?.entry_skill;
-
-    if (!entrySkillName) {
-      // Heuristic 1: Look for explicit router or master declaration in skills
-      const routerMatch = parsedSkills.find((s) => {
-        const text = (s.name + ' ' + s.displayName + ' ' + s.description + ' ' + s.content).toLowerCase();
-        return (
-          text.includes('总路由') ||
-          text.includes('总入口') ||
-          text.includes('router') ||
-          text.includes('主入口') ||
-          s.name.endsWith('-researcher') ||
-          s.name === 'researcher'
-        );
-      });
-      if (routerMatch) {
-        entrySkillName = routerMatch.name;
-      }
+    // 5. Section 9: Select Best Main Entry from Scored Candidates
+    let mainCandidate: EntryCandidate | null = null;
+    if (entryCandidates && entryCandidates.length > 0) {
+      mainCandidate = entryCandidates[0];
+    } else if (parsedEntries.length > 0) {
+      mainCandidate = {
+        path: parsedEntries[0].path,
+        score: 50,
+        evidence: ['唯一 SKILL.md 文件'],
+        reason: 'Default first entry',
+      };
     }
 
-    if (!entrySkillName && parsedSkills.length > 0) {
-      // Heuristic 2: Check root SKILL.md
-      const rootSkill = parsedSkills.find((s) => s.path.toLowerCase() === 'skill.md');
-      if (rootSkill) {
-        entrySkillName = rootSkill.name;
-      } else {
-        entrySkillName = parsedSkills[0].name;
-      }
+    let mainEntrySkill = parsedEntries.find((s) => s.path === mainCandidate?.path);
+    if (!mainEntrySkill && parsedEntries.length > 0) {
+      mainEntrySkill = parsedEntries[0];
     }
 
-    let mainEntrySkill = parsedSkills.find((s) => s.name === entrySkillName || s.id === entrySkillName);
-    if (!mainEntrySkill && parsedSkills.length > 0) {
-      mainEntrySkill = parsedSkills[0];
-    }
-
-    // If still no SKILL.md at all, fabricate a virtual entry from README
+    // If still no SKILL.md, fallback virtual entry from README
     if (!mainEntrySkill) {
+      const vId = this.generateStableSkillId('README.md');
       mainEntrySkill = {
-        id: projectName.toLowerCase().replace(/[^a-z0-9_-]/g, '-'),
+        id: vId,
         name: projectName,
         displayName: projectDisplayName,
         description: projectDescription,
         path: 'README.md',
+        type: 'skill',
         category: '文档驱动项目',
         role: 'standalone',
         content: readmeContent || '# ' + projectDisplayName,
         contentPreview: (readmeContent || '').slice(0, 500),
       };
-      parsedSkills.push(mainEntrySkill);
+      parsedEntries.push(mainEntrySkill);
     }
 
-    // Assign roles: Main entry is router/main, rest are specialty or subskill
-    mainEntrySkill.role = parsedSkills.length > 1 ? 'router' : 'standalone';
-    const childSkills = parsedSkills
-      .filter((s) => s.id !== mainEntrySkill!.id)
-      .map((s) => ({
-        id: s.id,
-        name: s.name,
-        displayName: s.displayName,
-        description: s.description,
-        path: s.path,
-        role: (mainEntrySkill!.role === 'router' ? 'specialty' : 'subskill') as 'specialty' | 'subskill',
-        category: s.category,
-        contentPreview: s.contentPreview,
-      }));
+    mainEntrySkill.role = parsedEntries.length > 1 ? 'router' : 'standalone';
 
-    // 6. Determine Project Type
-    let projectType: SkillProjectMap['projectType'] = 'single_skill';
-    if (parsedSkills.length > 1 || packManifest?.entry_skill) {
-      projectType = 'skill_pack';
+    // 6. Section 8: Determine Project Type
+    let projectType: SkillProjectType = 'skill';
+    if (parsedEntries.length > 1 || packManifest?.entry_skill) {
+      projectType = 'skill-pack';
     } else if (scripts.length > 0) {
-      projectType = 'script_skill';
+      projectType = 'script-project';
     } else if (files.some((f) => f.path.includes('workflows/'))) {
-      projectType = 'agent_workflow';
+      projectType = 'workflow';
+    } else if (files.some((f) => f.path.endsWith('.mcp.json') || f.path.endsWith('mcp.json'))) {
+      projectType = 'agent';
     } else {
-      projectType = 'prompt_skill';
+      projectType = 'skill';
     }
 
     // 7. Detect Dependencies & Tools
@@ -238,85 +347,55 @@ export class SkillProjectInterpreter {
       .join('\n')
       .toLowerCase();
 
-    const npmDeps: string[] = [];
-    const pipDeps: string[] = [];
-    const envVars: string[] = [];
-    const requiredTools: string[] = [];
-    const mcpRequirements: string[] = [];
+    const dependencies: DependencyInfo[] = [];
+    const environment: EnvironmentRequirement[] = [];
+    const tools: ToolRequirement[] = [];
 
-    // Check package.json
+    // Manifest deps
     for (const [k, v] of Object.entries(manifests)) {
       if (k.endsWith('package.json') && typeof v === 'object') {
         const deps = { ...v.dependencies, ...v.devDependencies };
-        npmDeps.push(...Object.keys(deps));
-      }
-    }
-
-    // Check requirements.txt
-    const reqFile = files.find((f) => f.path.toLowerCase().endsWith('requirements.txt'));
-    if (reqFile && reqFile.content) {
-      for (const line of reqFile.content.split('\n')) {
-        const trimmed = line.trim();
-        if (trimmed && !trimmed.startsWith('#')) {
-          pipDeps.push(trimmed.split(/[=<>~]/)[0].trim());
+        for (const dep of Object.keys(deps)) {
+          dependencies.push({ name: dep, type: 'npm', required: true, version: deps[dep] });
         }
-      }
-    }
-
-    // Check .env.example
-    const envFile = files.find((f) => f.path.toLowerCase().includes('.env'));
-    if (envFile && envFile.content) {
-      for (const line of envFile.content.split('\n')) {
-        const trimmed = line.trim();
-        if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
-          envVars.push(trimmed.split('=')[0].trim());
+        environment.push({ runtime: 'node', required: true, source: k });
+      } else if (k.endsWith('requirements.txt') && typeof v === 'string') {
+        for (const line of v.split('\n')) {
+          const clean = line.trim();
+          if (clean && !clean.startsWith('#')) {
+            dependencies.push({ name: clean, type: 'pip', required: true });
+          }
         }
+        environment.push({ runtime: 'python', required: true, source: k });
       }
     }
 
-    // Detect Tooling requirements from content
-    const needsBrowser =
+    // Tools detection
+    if (
       fullTextScan.includes('browser') ||
       fullTextScan.includes('playwright') ||
-      fullTextScan.includes('puppeteer') ||
-      fullTextScan.includes('网页浏览') ||
-      fullTextScan.includes('真实浏览器') ||
-      fullTextScan.includes('dom') ||
-      fullTextScan.includes('html');
-
-    const needsSearch =
-      fullTextScan.includes('search') ||
-      fullTextScan.includes('搜索') ||
-      fullTextScan.includes('公开信息') ||
+      fullTextScan.includes('网页') ||
       fullTextScan.includes('网络检索') ||
-      fullTextScan.includes('industry-research');
-
-    const needsFiles =
-      fullTextScan.includes('excel') ||
-      fullTextScan.includes('xlsx') ||
-      fullTextScan.includes('markdown') ||
-      fullTextScan.includes('文件') ||
-      fullTextScan.includes('报告交付');
-
-    if (needsBrowser) {
-      requiredTools.push('Browser Automation Tool (Playwright/Chrome)');
-      mcpRequirements.push('Browser MCP');
+      fullTextScan.includes('search') ||
+      fullTextScan.includes('http')
+    ) {
+      tools.push({ name: 'Web Browser & Search MCP', type: 'browser', required: true, reason: '行业前沿情报采集与网页检索' });
+      environment.push({ runtime: 'playwright', required: true, source: 'tool_requirement' });
     }
-    if (needsSearch) {
-      requiredTools.push('Web Search Tool (Google/Bing/SearXNG)');
-      mcpRequirements.push('Search MCP');
-    }
-    if (needsFiles) {
-      requiredTools.push('Document & File Processor (Markdown/XLSX/PDF)');
-      mcpRequirements.push('File MCP');
-    }
-    requiredTools.push('Gemini AI Inference Adapter');
 
-    // 8. Build Relationship Graph
+    if (scripts.length > 0) {
+      tools.push({ name: 'Local Script Runner', type: 'script', required: false, reason: '本地 Python/Node 工具脚本执行' });
+    }
+
+    tools.push({ name: 'Document & Artifact Bus', type: 'filesystem', required: true, reason: '跨技能结构化产物生成与传递' });
+    tools.push({ name: 'Gemini Model Adapter', type: 'model', required: true, reason: '专业逻辑推理与结论综合' });
+
+    // 8. Section 12 & 13: Build Semantic Relationships Graph
     const nodes: RelationshipNode[] = [];
-    const edges: RelationshipEdge[] = [];
+    const rawEdges: RelationshipEdge[] = [];
+    const relationships: SkillRelationship[] = [];
 
-    // Main Entry node
+    // Add Main Entry Node
     nodes.push({
       id: mainEntrySkill.id,
       label: mainEntrySkill.displayName || mainEntrySkill.name,
@@ -324,33 +403,75 @@ export class SkillProjectInterpreter {
       role: mainEntrySkill.role,
     });
 
-    // Child Skills nodes and edges
-    for (const child of childSkills) {
+    // Add Child Skills Nodes and Relationships
+    for (const entry of parsedEntries) {
+      if (entry.id === mainEntrySkill.id) continue;
+
       nodes.push({
-        id: child.id,
-        label: child.displayName || child.name,
+        id: entry.id,
+        label: entry.displayName || entry.name,
         type: 'child_skill',
-        role: child.role,
+        role: 'subskill',
       });
 
-      edges.push({
+      // Semantic relationship: Main orchestrates/invokes child
+      const rel: SkillRelationship = {
         from: mainEntrySkill.id,
-        to: child.id,
-        type: 'orchestrates',
+        to: entry.id,
+        type: 'invoke',
+        confidence: 0.95,
+        evidence: [`主入口 ${mainEntrySkill.name} 统筹调度专项技能 ${entry.name}`],
         label: '调度专项分析',
+      };
+      relationships.push(rel);
+
+      rawEdges.push({
+        from: mainEntrySkill.id,
+        to: entry.id,
+        type: 'invoke',
+        label: '调度专项分析',
+        confidence: 0.95,
       });
+
+      // Check cross-subskill feeding: e.g. Market/Tech feeds Investment
+      const entryText = (entry.content || '').toLowerCase();
+      if (entryText.includes('投资') || entryText.includes('商业化') || entryText.includes('综合')) {
+        // This is a downstream synthesis skill
+        for (const upstream of parsedEntries) {
+          if (upstream.id !== entry.id && upstream.id !== mainEntrySkill.id) {
+            const upName = upstream.name.toLowerCase();
+            if (upName.includes('市场') || upName.includes('技术') || upName.includes('竞争') || upName.includes('供应链')) {
+              relationships.push({
+                from: upstream.id,
+                to: entry.id,
+                type: 'feeds',
+                confidence: 0.85,
+                evidence: [`专项数据输入汇聚至下游综合分析 ${entry.name}`],
+                label: '产物输入汇聚',
+              });
+
+              rawEdges.push({
+                from: upstream.id,
+                to: entry.id,
+                type: 'feeds',
+                label: '产物输入汇聚',
+                confidence: 0.85,
+              });
+            }
+          }
+        }
+      }
     }
 
-    // Tools nodes
-    for (const mcp of mcpRequirements) {
-      const toolId = `tool-${mcp.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+    // Add Tool Nodes
+    for (const tool of tools) {
+      const toolId = `tool_${tool.type}_${crypto.createHash('md5').update(tool.name).digest('hex').slice(0, 6)}`;
       nodes.push({
         id: toolId,
-        label: mcp,
-        type: 'mcp',
+        label: tool.name,
+        type: tool.type === 'browser' ? 'tool' : 'mcp',
       });
-
-      edges.push({
+      rawEdges.push({
         from: mainEntrySkill.id,
         to: toolId,
         type: 'uses_tool',
@@ -358,200 +479,176 @@ export class SkillProjectInterpreter {
       });
     }
 
-    // Structure Type
+    // 9. Section 14: Validate Graph & Detect Cycles
+    const { cleanEdges, hasCycle, cycleNodes, topologicalOrder } = this.validateAndAnalyzeGraph(nodes, rawEdges);
+
     const structureType: RelationshipGraph['structureType'] =
-      childSkills.length > 5 ? 'tree' : childSkills.length > 0 ? 'parallel' : 'chain';
+      parsedEntries.length > 5 ? 'tree' : parsedEntries.length > 1 ? 'parallel' : 'chain';
 
     const relationshipGraph: RelationshipGraph = {
       structureType,
       nodes,
-      edges,
+      edges: cleanEdges,
+      hasCycle,
+      cycleNodes,
+      topologicalOrder,
     };
 
-    // 9. Build Runtime Intent (Understanding author intent without altering files)
-    const authorIntent =
-      projectDescription ||
-      `利用 ${mainEntrySkill.displayName} 统筹协同各专业子能力，产出高质量可交付分析报告。`;
+    // 10. Compatibility Profile
+    const compatibility: CompatibilityProfile = {
+      level: parsedEntries.length > 1 ? 'L2' : 'L1',
+      status: 'compatible',
+      summary: `已完成自动化结构解析，识别出 ${parsedEntries.length} 个技能单元与 ${tools.length} 项工具依赖。`,
+      canExecuteLocally: true,
+      limitations: [],
+      recommendations: ['在执行复杂任务时优先采用 DAG 编排与并行数据采集'],
+    };
 
-    const methods: string[] = [];
-    if (mainEntrySkill.role === 'router') {
-      methods.push('总路由调度与任务开题分析');
-      methods.push('分派子专业专项深度研判');
-      methods.push('交叉核对多源数据与置信度审计');
-      methods.push('统筹汇总生成结构化主报告');
-    } else {
-      methods.push('单体专业规范引导执行');
-      methods.push('按照 SKILL.md 定义的操作流程逐步落实');
-    }
+    // 11. Build Final SkillProjectMap
+    const projectMap: SkillProjectMap = {
+      projectId: `proj_${crypto.createHash('sha256').update(projectName).digest('hex').slice(0, 10)}`,
+      projectName,
+      projectType,
+      projectDescription,
+      rootDir: '',
+      version: packManifest?.version || '1.0.0',
+      author: packManifest?.author,
+      sourceType: sourceType || 'builtin',
+      sourceUrl,
+      mainEntry: mainCandidate || {
+        path: mainEntrySkill.path,
+        score: 100,
+        evidence: ['主要入口点'],
+        reason: 'Main Entry',
+      },
+      entryCandidates: entryCandidates || [],
+      entries: parsedEntries,
+      relationships,
+      scripts,
+      references,
+      templates,
+      dependencies,
+      environment,
+      tools,
+      evidence: raw.evidence,
+      compatibility,
+      relationshipGraph,
+      childSkills: parsedEntries.filter((e) => e.id !== mainEntrySkill!.id).map((e) => ({
+        id: e.id,
+        name: e.name,
+        displayName: e.displayName || e.name,
+        description: e.description || '',
+        path: e.path,
+        role: 'specialty',
+        category: e.category,
+        contentPreview: e.contentPreview,
+      })),
+      supportingResources: {
+        references: references.map((r) => ({ path: r.path, size: r.size, name: r.name })),
+        templates: templates.map((t) => ({ path: t.path, size: t.size, name: t.name })),
+        examples: examples.map((e) => ({ path: e.path, size: e.size, name: e.name })),
+        scripts: scripts.map((s) => ({ path: s.path, size: s.size, name: s.name, runtime: s.runtime })),
+        configs: configs.map((c) => ({ path: c.path, size: c.size, name: c.name })),
+      },
+      scannedFilesCount: files.length,
+    };
 
-    const sequence = [
+    // 12. Build Runtime Intent
+    const runtimeIntent = this.buildRuntimeIntent(projectMap, mainEntrySkill, parsedEntries, tools);
+
+    return { projectMap, runtimeIntent };
+  }
+
+  private buildRuntimeIntent(
+    projectMap: SkillProjectMap,
+    mainSkill: SkillEntry,
+    allSkills: SkillEntry[],
+    tools: ToolRequirement[]
+  ): RuntimeIntent {
+    const childSkills = allSkills.filter((s) => s.id !== mainSkill.id);
+
+    const workflow = [
       {
         stepNumber: 1,
         title: '任务拆解与研究范围界定',
-        skillOrTool: mainEntrySkill.name,
+        skillOrTool: mainSkill.name,
         action: '提取用户核心问题，划定研究标的、基准时间与边界',
         expectedOutput: '明确开题界定与分析框架',
       },
       {
         stepNumber: 2,
         title: '全网一手事实检索与数据采集',
-        skillOrTool: 'Search & Browser Tools',
-        action: '结合行业关键词与权威渠道抓取最新行业指标与事实',
+        skillOrTool: 'Web Browser & Search MCP',
+        action: '结合行业关键词与权威渠道抓取最新行业指标与一手证据',
         expectedOutput: '真实可查证的来源数据底表',
       },
       {
         stepNumber: 3,
-        title: childSkills.length > 0 ? `调度下属 ${childSkills.length} 个专项分支深度分析` : '执行专业方法论推演',
-        skillOrTool: childSkills.length > 0 ? childSkills.slice(0, 3).map((s) => s.name).join(', ') : mainEntrySkill.name,
-        action: '依据各专项 SKILL.md 规范进行测算、对比及图谱绘制',
-        expectedOutput: '专项核心结论与量化指标',
+        title: childSkills.length > 0 ? `调度 ${childSkills.length} 个专项分支并行分析` : '执行专业方法论推演',
+        skillOrTool: childSkills.length > 0 ? childSkills.slice(0, 4).map((s) => s.name).join(', ') : mainSkill.name,
+        action: '依据各专项规范进行市场规模测算、产业链梳理及技术研判',
+        expectedOutput: '各专项结构化 Artifact 产物',
       },
       {
         stepNumber: 4,
         title: '交叉验证与结构化报告生成',
-        skillOrTool: 'File & Markdown Compiler',
-        action: '将事实、假设、测算与推论汇总为 Markdown 主报告',
+        skillOrTool: 'Document & Artifact Bus',
+        action: '汇总各专项 Artifacts，生成可追溯交付物与证据链报告',
         expectedOutput: '排版严谨的结构化研究交付物',
       },
     ];
 
-    const runtimeIntent: RuntimeIntent = {
-      goal: `根据「${projectDisplayName}」的项目规范，系统化执行用户委托任务并输出严谨结论。`,
-      authorIntent,
+    return {
+      projectId: projectMap.projectId,
+      task: '通用异构技能调度与深度研究',
+      goal: `根据「${projectMap.projectName}」项目规范，系统化调度技能与工具链，产出真实可溯源的高质量成果。`,
+      authorIntent: projectMap.projectDescription,
       inputs: [
-        { name: '任务主题或研究标的', description: '如指定行业、企业、产品或合同文本', required: true },
-        { name: '交付要求', description: '报告深度、关键侧重点或限定时间范围', required: false },
+        { name: '任务主题或研究标的', description: '如指定行业、企业、技术或产品', required: true },
+        { name: '研究截止日期 (Cutoff Date)', description: '默认取系统当前日期 2026-09-24', required: false },
       ],
-      methods,
-      skills: parsedSkills.map((s) => ({
-        id: s.id,
-        name: s.displayName || s.name,
-        role: s.role,
-        purpose: s.description,
-      })),
-      tools: requiredTools,
-      sequence,
-      dependencies: [...npmDeps, ...pipDeps],
-      outputs: [
-        { name: 'Markdown 专业主报告', format: 'markdown', description: '包含核心结论、推导过程与证据链' },
-        ...(templates.length > 0 ? [{ name: '标准模板交付物', format: 'template/xlsx', description: '配套工作底表或模板格式' }] : []),
+      requiredCapabilities: [
+        '自然语言解析',
+        '多源信息情报检索',
+        '跨技能数据流与产物汇聚',
+        '事实/预测分类与一致性校验',
       ],
-      verification: [
-        { check: '证据来源可溯源性', standard: '每项关键数据需具备一手出处与基准日期' },
-        { check: '各专项结论一致性', standard: '子模块测算与总报告结论逻辑自洽' },
+      selectedSkills: allSkills.map((s) => s.name),
+      workflow,
+      tools,
+      expectedOutputs: [
+        { name: 'Markdown 专业主报告', format: 'markdown', description: '包含核心结论、推导过程与证据链', required: true },
+        { name: '结构化产物集合 (Artifacts)', format: 'json', description: '各专项子分析输出的结构化数据', required: true },
       ],
       constraints: [
-        '不得凭空臆造未核实的数据或引用',
-        '必须显式记录研究时间基准与数据有效区间',
-        '若存在未解决信息缺口需如实披露限制',
+        { description: '不得凭空臆造未核实的数据或引用', category: 'data_integrity' },
+        { description: '所有研究任务显式注入当前时间基准 (2026-09-24)', category: 'temporal' },
+        { description: '最终报告必须严格基于实际产生的 Artifacts 与执行链路', category: 'data_integrity' },
       ],
-      risks: [
-        '数据公开度有限可能需要扩大搜索广度',
-        '多源数据可能存在统计口径冲突，需以权威官方为主',
+      completionConditions: [
+        { condition: '证据可溯源性', standard: '每项关键数据需具备一手出处与基准日期' },
+        { condition: '各专项产物完整性', standard: '所选专项技能产出有效 Artifact' },
       ],
-      completionCriteria: [
-        '覆盖任务核心诉求',
-        '产出符合规范的结构化报告文档',
-        '通过证据与方法完整性自检',
+      failureConditions: [
+        { condition: '工具全部无法联通', handling: '生成降级提示并报告数据获取受限' },
       ],
+      evidenceRequirements: [
+        { type: 'FACT', description: '一手官方或权威机构公开数据', strictness: 'mandatory' },
+        { type: 'FORECAST', description: '标明预测起点与预测区间的市场估算', strictness: 'mandatory' },
+      ],
+      // Legacy compatibility
+      methods: ['总路由调度', '专项并行研究', '产物汇聚与交叉检验'],
+      skills: allSkills.map((s) => ({ id: s.id, name: s.displayName || s.name, role: s.role as any, purpose: s.description || '' })),
+      sequence: workflow,
+      dependencies: projectMap.dependencies.map((d) => d.name),
+      outputs: [
+        { name: 'Markdown 专业主报告', format: 'markdown', description: '包含核心结论、推导过程与证据链' },
+      ],
+      risks: ['公开数据存在统计口径冲突需标明出处'],
+      completionCriteria: ['完成多维事实梳理并产出结论'],
     };
-
-    // 10. Assemble complete SkillProjectMap
-    const projectMap: SkillProjectMap = {
-      projectId: projectName.toLowerCase().replace(/[^a-z0-9_-]/g, '-'),
-      projectName,
-      projectType,
-      projectDescription,
-      version: packManifest?.version || '1.0.0',
-      author: packManifest?.author || packManifest?.maintainer,
-      sourceType: raw.sourceType,
-      sourceUrl: raw.sourceUrl,
-
-      mainEntry: {
-        id: mainEntrySkill.id,
-        name: mainEntrySkill.name,
-        displayName: mainEntrySkill.displayName || mainEntrySkill.name,
-        path: mainEntrySkill.path,
-        description: mainEntrySkill.description,
-        role: mainEntrySkill.role === 'router' ? 'router' : 'main',
-        contentPreview: mainEntrySkill.contentPreview,
-      },
-
-      childSkills,
-
-      supportingResources: {
-        references,
-        templates,
-        examples,
-        scripts,
-        configs,
-      },
-
-      dependencies: {
-        runtime: ['Node.js >= 18', ...(pipDeps.length > 0 || scripts.some((s) => s.runtime === 'python') ? ['Python 3.9+'] : [])],
-        npm: npmDeps,
-        pip: pipDeps,
-        envVars,
-        systemTools: ['git'],
-      },
-
-      requiredTools,
-      mcpRequirements,
-      browserRequirements: {
-        needed: needsBrowser,
-        reason: needsBrowser ? '需要通过真实浏览器访问目标站点并提取实时内容' : '无需浏览器交互',
-      },
-      externalServices: ['Gemini 2.5/3.0 推理网关'],
-
-      relationshipGraph,
-      installationSteps: [
-        '勘探项目边界与文件清单',
-        '提取总路由主入口与下属专项分支',
-        '验证依赖与工具链适配状态',
-        '构建运行时意图 (Runtime Intent) 与拓扑映射',
-        '安全存入本地技能项目库',
-      ],
-      executionSteps: sequence.map((s) => s.title),
-      outputExpectation: runtimeIntent.outputs.map((o) => `${o.name} (${o.format})`),
-      verificationExpectation: runtimeIntent.verification.map((v) => v.check),
-
-      scannedFilesCount: files.length,
-    };
-
-    return {
-      projectMap,
-      runtimeIntent,
-    };
-  }
-
-  private extractTitleFromMarkdown(md: string): string | null {
-    for (const line of md.split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('# ')) {
-        return trimmed.replace(/^#\s+/, '').trim();
-      }
-    }
-    return null;
-  }
-
-  private extractSummaryFromMarkdown(md: string): string | null {
-    let started = false;
-    const lines: string[] = [];
-
-    for (const line of md.split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('#')) {
-        started = true;
-        continue;
-      }
-      if (started && trimmed && !trimmed.startsWith('```') && !trimmed.startsWith('![')) {
-        lines.push(trimmed);
-        if (lines.length >= 2) break;
-      }
-    }
-
-    return lines.length > 0 ? lines.join(' ') : null;
   }
 }
 
 export const globalSkillProjectInterpreter = new SkillProjectInterpreter();
+

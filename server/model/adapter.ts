@@ -89,12 +89,12 @@ export class GeminiModelAdapter implements IModelAdapter {
     const primaryModel = options?.modelName || 'gemini-3.8-flash';
 
     // Model fallback sequence:
-    // 1. Primary requested model (gemini-3.8-flash)
+    // 1. Primary requested model (gemini-3.8-flash or custom)
     // 2. High-availability Gemini 2.5 Flash
     // 3. Ultra-low latency Gemini 3.1 Flash Lite
-    // 4. Gemini Flash Latest
+    // 4. Gemini 3.8 Flash
     const baseCandidates = Array.from(
-      new Set([primaryModel, 'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'])
+      new Set([primaryModel, 'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.8-flash'])
     ).filter(Boolean);
 
     // Dynamic Circuit Breaker: prioritize healthy models that are NOT currently in 503/429 cooldown
@@ -129,9 +129,9 @@ export class GeminiModelAdapter implements IModelAdapter {
         const isTransient = isTransientOrUnavailable(err);
 
         if (isTransient) {
-          // Put this model in a 45-second cooldown so subsequent requests don't waste time on it
+          // Put this model in cooldown so subsequent requests don't waste time on it
           modelCooldowns.set(model, Date.now() + 45000);
-          console.log(`[GeminiAdapter] Model "${model}" temporarily busy, automatically routing to alternative model...`);
+          console.log(`[GeminiAdapter] Model "${model}" temporarily busy/quota reached, automatically routing to alternative model...`);
           // Immediately try the next candidate model
           continue;
         }

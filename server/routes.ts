@@ -16,6 +16,13 @@ import { globalAgentCore } from './agent/core';
 import { globalAutomationEngine } from './automation/engine';
 import { TaskRecord, ExecutionMode } from './types';
 import { convertMarkdownToDocx } from './utils/markdownToDocx';
+import { globalRuntimeIntentBuilder } from './skills/runtime-intent';
+import { globalSkillPlanner } from './skills/planner';
+import { globalSkillOrchestrator } from './skills/orchestrator';
+import { globalArtifactBus } from './skills/artifacts';
+import { globalExecutionTraceManager } from './skills/execution-trace';
+import { globalSkillDb } from './database/db';
+
 
 const router = express.Router();
 
@@ -203,6 +210,108 @@ router.post('/skills/repair-environment', async (req: Request, res: Response) =>
   res.json({ success: true, data: result });
 });
 
+// ==================== UNIVERSAL HETEROGENEOUS SKILL RUNTIME (V0.3.1 ~ V0.3.2) ====================
+
+// Section 18: Get full host EnvironmentProfile
+router.get('/skills/runtime/profile', async (req: Request, res: Response) => {
+  try {
+    const profile = await globalEnvironmentAdapter.getEnvironmentProfile();
+    res.json({ success: true, data: profile });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Section 24: Generate DAG ExecutionPlan & RuntimeIntent for task
+router.post('/skills/runtime/plan', async (req: Request, res: Response) => {
+  try {
+    const { task, projectId, researchCutoff } = req.body;
+    if (!task) {
+      return res.status(400).json({ success: false, error: '请提供研究任务或 Prompt' });
+    }
+
+    const project = projectId
+      ? globalSkillProjectStore.getProject(projectId)
+      : globalSkillProjectStore.getProjects()[0];
+
+    if (!project) {
+      return res.status(404).json({ success: false, error: '未找到可用的 Skill 项目' });
+    }
+
+    const cutoff = researchCutoff || '2026-09-24';
+    const runtimeIntent = globalRuntimeIntentBuilder.build(task, project.projectMap, cutoff);
+    const envProfile = await globalEnvironmentAdapter.getEnvironmentProfile();
+    const plan = globalSkillPlanner.plan(task, runtimeIntent, project.projectMap, envProfile);
+
+    res.json({
+      success: true,
+      data: {
+        plan,
+        runtimeIntent,
+        projectMap: project.projectMap,
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Section 23 & 26: Execute Plan via DAG Orchestrator
+router.post('/skills/runtime/execute', async (req: Request, res: Response) => {
+  try {
+    const { plan, researchCutoff } = req.body;
+    if (!plan || !plan.steps) {
+      return res.status(400).json({ success: false, error: '缺少有效的 ExecutionPlan' });
+    }
+
+    const result = await globalSkillOrchestrator.executePlan(plan, {
+      researchCutoff: researchCutoff || '2026-09-24',
+    });
+
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Section 31: List Execution Runs
+router.get('/skills/runtime/runs', (req: Request, res: Response) => {
+  const runs = globalSkillDb.listExecutionRuns(50);
+  res.json({ success: true, data: runs });
+});
+
+// Section 31 & 32: Get single run with Traces, Artifacts, Evidence
+router.get('/skills/runtime/runs/:runId', (req: Request, res: Response) => {
+  const { runId } = req.params;
+  const run = globalSkillDb.getExecutionRun(runId);
+  if (!run) {
+    return res.status(404).json({ success: false, error: '未找到对应的执行记录' });
+  }
+
+  const traces = globalSkillDb.getExecutionTraces(runId);
+  const artifacts = globalSkillDb.getArtifacts(runId);
+  const evidence = globalSkillDb.getEvidenceRefs(runId);
+  const steps = globalSkillDb.getExecutionSteps(runId);
+
+  res.json({
+    success: true,
+    data: {
+      run,
+      steps,
+      traces,
+      artifacts,
+      evidence,
+    },
+  });
+});
+
+// Section 30: Trace single artifact upstream and evidence
+router.get('/skills/runtime/artifacts/:artifactId/trace', (req: Request, res: Response) => {
+  const { artifactId } = req.params;
+  const trace = globalArtifactBus.traceArtifact(artifactId);
+  res.json({ success: true, data: trace });
+});
+
 // ==================== SKILL ROUTES ====================
 router.get('/skills', (req: Request, res: Response) => {
   const workspaceId = req.query.workspaceId as string | undefined;
@@ -232,7 +341,10 @@ router.post('/skills/upload-zip', upload.single('file'), async (req: Request, re
     };
 
     const { project } = await globalSkillProjectStore.installProject(discoveryResult, workspaceId);
-    const primarySkill = globalSkillEngine.getSkillById(project.projectMap.mainEntry.id);
+    const mainSkillId = project.projectMap.mainEntry
+      ? (project.projectMap.entries?.find((e) => e.path === project.projectMap.mainEntry?.path)?.id || project.id)
+      : project.id;
+    const primarySkill = globalSkillEngine.getSkillById(mainSkillId);
     res.json({ success: true, data: primarySkill, project });
   } catch (e: any) {
     // Fallback to legacy zip import
@@ -280,7 +392,10 @@ router.post('/skills/import-github', async (req: Request, res: Response) => {
 
     // 2. Install project into project store
     const { project, diagnosticLogs } = await globalSkillProjectStore.installProject(discoveryResult, workspaceId);
-    const primarySkill = globalSkillEngine.getSkillById(project.projectMap.mainEntry.id);
+    const mainSkillId = project.projectMap.mainEntry
+      ? (project.projectMap.entries?.find((e) => e.path === project.projectMap.mainEntry?.path)?.id || project.id)
+      : project.id;
+    const primarySkill = globalSkillEngine.getSkillById(mainSkillId);
 
     return res.json({
       success: true,

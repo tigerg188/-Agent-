@@ -405,4 +405,53 @@ export const api = {
     const json = await res.json();
     return json.data;
   },
+
+  // Universal Skill Runtime (V0.3.1 ~ V0.3.2)
+  async getRuntimeProfile(): Promise<any> {
+    const res = await fetch(`${API_BASE}/skills/runtime/profile`);
+    const json = await res.json();
+    return json.data;
+  },
+
+  async createRuntimePlan(task: string, projectId?: string, researchCutoff = '2026-09-24'): Promise<any> {
+    const res = await fetch(`${API_BASE}/skills/runtime/plan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task, projectId, researchCutoff }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || '创建执行计划失败');
+    return json.data;
+  },
+
+  async executeRuntimePlan(plan: any, researchCutoff = '2026-09-24'): Promise<any> {
+    const res = await fetch(`${API_BASE}/skills/runtime/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan, researchCutoff }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || '执行 DAG 失败');
+    return json.data;
+  },
+
+  async getRuntimeRuns(): Promise<any[]> {
+    const res = await fetch(`${API_BASE}/skills/runtime/runs`);
+    const json = await res.json();
+    return json.data || [];
+  },
+
+  async getRuntimeRun(runId: string): Promise<any> {
+    const res = await fetch(`${API_BASE}/skills/runtime/runs/${runId}`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || '获取运行详情失败');
+    return json.data;
+  },
+
+  async traceArtifact(artifactId: string): Promise<any> {
+    const res = await fetch(`${API_BASE}/skills/runtime/artifacts/${artifactId}/trace`);
+    const json = await res.json();
+    return json.data;
+  },
 };
+
