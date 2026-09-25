@@ -63,6 +63,7 @@ export interface SkillRelationship {
     | 'precedes'
     | 'parallel_with'
     | 'fallback_to';
+  origin?: 'declared' | 'inferred';
   confidence: number;
   evidence: string[];
   label?: string;
@@ -131,6 +132,7 @@ export interface RelationshipEdge {
   from: string;
   to: string;
   type: 'calls' | 'orchestrates' | 'uses_tool' | 'executes_script' | 'reads_reference' | 'uses_template' | 'produces' | 'invoke' | 'depends_on' | 'feeds' | 'references' | 'delegates_to' | 'precedes' | 'parallel_with' | 'fallback_to';
+  origin?: 'declared' | 'inferred';
   label?: string;
   confidence?: number;
   evidence?: string[];

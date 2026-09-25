@@ -37,8 +37,8 @@ export class ArtifactBus {
       content: params.content,
       inputArtifactIds: params.inputArtifactIds || [],
       evidenceIds: params.evidenceIds || [],
-      confidence: params.confidence || 0.95,
-      status: 'processed',
+      confidence: params.confidence, // null/undefined until Verifier calculates it!
+      status: 'raw',
       timestamp: new Date().toISOString(),
       metadata: params.metadata,
     };
@@ -82,9 +82,9 @@ export class ArtifactBus {
       source: evidence.source,
       url: evidence.url,
       title: evidence.title,
-      publishedAt: evidence.publishedAt || '2026-09-01',
+      publishedAt: evidence.publishedAt, // Do not fake a date if unknown!
       accessedAt: evidence.accessedAt || new Date().toISOString(),
-      dataDate: evidence.dataDate || '2026-09-24',
+      dataDate: evidence.dataDate,
       claim: evidence.claim,
       artifactId: evidence.artifactId,
       dataType: evidence.dataType || 'FACT',

@@ -1,6 +1,6 @@
 import path from 'path';
 import crypto from 'crypto';
-import { RawProjectDiscovery } from './discovery';
+import type { RawProjectDiscovery } from './discovery';
 import {
   SkillProjectMap,
   SkillProjectType,
@@ -370,17 +370,19 @@ export class SkillProjectInterpreter {
       }
     }
 
-    // Tools detection
-    if (
-      fullTextScan.includes('browser') ||
+    // Tools detection based on explicit capability declarations
+    const hasExplicitBrowserRequirement =
       fullTextScan.includes('playwright') ||
-      fullTextScan.includes('网页') ||
+      fullTextScan.includes('puppeteer') ||
+      fullTextScan.includes('web search') ||
+      fullTextScan.includes('browser') ||
+      fullTextScan.includes('网页检索') ||
       fullTextScan.includes('网络检索') ||
-      fullTextScan.includes('search') ||
-      fullTextScan.includes('http')
-    ) {
+      fullTextScan.includes('实时搜索');
+
+    if (hasExplicitBrowserRequirement) {
       tools.push({ name: 'Web Browser & Search MCP', type: 'browser', required: true, reason: '行业前沿情报采集与网页检索' });
-      environment.push({ runtime: 'playwright', required: true, source: 'tool_requirement' });
+      environment.push({ runtime: 'playwright', required: false, source: 'tool_requirement' });
     }
 
     if (scripts.length > 0) {
@@ -391,6 +393,7 @@ export class SkillProjectInterpreter {
     tools.push({ name: 'Gemini Model Adapter', type: 'model', required: true, reason: '专业逻辑推理与结论综合' });
 
     // 8. Section 12 & 13: Build Semantic Relationships Graph
+    // Distinguish DECLARED (explicitly stated in manifest/SKILL.md) vs INFERRED
     const nodes: RelationshipNode[] = [];
     const rawEdges: RelationshipEdge[] = [];
     const relationships: SkillRelationship[] = [];
@@ -403,6 +406,9 @@ export class SkillProjectInterpreter {
       role: mainEntrySkill.role,
     });
 
+    // Check if main entry's SKILL.md explicitly mentions child skill names/paths
+    const mainContent = (mainEntrySkill.content || '').toLowerCase();
+
     // Add Child Skills Nodes and Relationships
     for (const entry of parsedEntries) {
       if (entry.id === mainEntrySkill.id) continue;
@@ -414,14 +420,27 @@ export class SkillProjectInterpreter {
         role: 'subskill',
       });
 
-      // Semantic relationship: Main orchestrates/invokes child
+      // Check whether this relationship is declared in the main manifest/docs or structurally inferred
+      const isExplicitlyReferenced =
+        mainContent.includes(entry.name.toLowerCase()) ||
+        mainContent.includes(entry.path.toLowerCase()) ||
+        (entry.displayName && mainContent.includes(entry.displayName.toLowerCase()));
+
+      const origin: 'declared' | 'inferred' = isExplicitlyReferenced ? 'declared' : 'inferred';
+      const confidence = isExplicitlyReferenced ? 0.90 : 0.60;
+
       const rel: SkillRelationship = {
         from: mainEntrySkill.id,
         to: entry.id,
         type: 'invoke',
-        confidence: 0.95,
-        evidence: [`主入口 ${mainEntrySkill.name} 统筹调度专项技能 ${entry.name}`],
-        label: '调度专项分析',
+        origin,
+        confidence,
+        evidence: [
+          isExplicitlyReferenced
+            ? `主入口文档显式声明或引用专项分支技能 ${entry.name}`
+            : `项目结构推断：作为下属专项候选技能 ${entry.name}`,
+        ],
+        label: isExplicitlyReferenced ? '显式编排调度' : '结构关联候选',
       };
       relationships.push(rel);
 
@@ -429,35 +448,37 @@ export class SkillProjectInterpreter {
         from: mainEntrySkill.id,
         to: entry.id,
         type: 'invoke',
-        label: '调度专项分析',
-        confidence: 0.95,
+        origin,
+        label: isExplicitlyReferenced ? '显式编排调度' : '结构关联候选',
+        confidence,
+        evidence: rel.evidence,
       });
 
-      // Check cross-subskill feeding: e.g. Market/Tech feeds Investment
+      // Check cross-subskill feeding based on explicit dependency mentions
       const entryText = (entry.content || '').toLowerCase();
-      if (entryText.includes('投资') || entryText.includes('商业化') || entryText.includes('综合')) {
-        // This is a downstream synthesis skill
-        for (const upstream of parsedEntries) {
-          if (upstream.id !== entry.id && upstream.id !== mainEntrySkill.id) {
-            const upName = upstream.name.toLowerCase();
-            if (upName.includes('市场') || upName.includes('技术') || upName.includes('竞争') || upName.includes('供应链')) {
-              relationships.push({
-                from: upstream.id,
-                to: entry.id,
-                type: 'feeds',
-                confidence: 0.85,
-                evidence: [`专项数据输入汇聚至下游综合分析 ${entry.name}`],
-                label: '产物输入汇聚',
-              });
+      for (const other of parsedEntries) {
+        if (other.id !== entry.id && other.id !== mainEntrySkill.id) {
+          const otherName = other.name.toLowerCase();
+          // Check if entry explicitly references other subskill by name or input
+          if (entryText.includes(otherName) || (entry.inputs && entry.inputs.some((inp) => inp.toLowerCase().includes(otherName)))) {
+            relationships.push({
+              from: other.id,
+              to: entry.id,
+              type: 'feeds',
+              origin: 'declared',
+              confidence: 0.85,
+              evidence: [`专项技能 ${entry.name} 文档/输入要求中显式引用了 ${other.name}`],
+              label: '声明产物依赖',
+            });
 
-              rawEdges.push({
-                from: upstream.id,
-                to: entry.id,
-                type: 'feeds',
-                label: '产物输入汇聚',
-                confidence: 0.85,
-              });
-            }
+            rawEdges.push({
+              from: other.id,
+              to: entry.id,
+              type: 'feeds',
+              origin: 'declared',
+              label: '声明产物依赖',
+              confidence: 0.85,
+            });
           }
         }
       }

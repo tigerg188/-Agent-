@@ -343,26 +343,20 @@ export class AgentCore {
           toolRes = await globalMcpManager.executeTool('browser_search_and_read', { keyword }, task.workspaceId);
         }
       } catch (err: any) {
-        console.warn('[AgentCore] Browser tool execution recovered from error:', err.message);
+        console.error('[AgentCore] Browser tool execution failed:', err.message);
         toolRes = {
-          success: true,
-          result: {
-            title: '网络与行业情报检索结果',
-            url: targetUrl || 'https://duckduckgo.com',
-            extractedContent: `针对主题「${task.prompt.slice(0, 40)}」已从网络与知识底座获取多维数据并建立分析模型。`,
-            screenshotBase64: '',
-          },
+          success: false,
+          error: `NETWORK_ERROR: ${err.message || '浏览器检索未能成功连接外部网络'}`,
         };
       }
 
       this.checkAbort(signal);
 
-      // Update browserStep from in_progress to success
-      browserStep.status = 'success';
-      browserStep.title = '工具调用完成：Browser 检索执行完毕';
-      globalHistoryStore.saveTask(task);
-
       if (toolRes.success && toolRes.result) {
+        browserStep.status = 'success';
+        browserStep.title = '工具调用完成：Browser 检索执行完毕';
+        globalHistoryStore.saveTask(task);
+
         browserResultData = toolRes.result.extractedContent || toolRes.result.contentSnippet || '';
         browserTitle = toolRes.result.title || '网页浏览结果';
         browserUrl = toolRes.result.url || '';
@@ -378,18 +372,22 @@ export class AgentCore {
           id: `step-tool-res-${Date.now()}`,
           stage: 'tool_result',
           title: '观察浏览器返回结果',
-          description: `成功获取「${browserTitle}」内容，提取到约 ${browserResultData.length || 300} 字结构化事实资料。`,
+          description: `成功获取「${browserTitle}」内容，提取到约 ${browserResultData.length} 字真实网页资料。`,
           timestamp: new Date().toISOString(),
           status: 'success',
         });
       } else {
+        browserStep.status = 'error';
+        browserStep.title = '工具调用失败：Browser 外部网络访问异常';
+        globalHistoryStore.saveTask(task);
+
         this.addStep(task, {
-          id: `step-tool-warn-${Date.now()}`,
+          id: `step-tool-fail-${Date.now()}`,
           stage: 'tool_result',
-          title: '浏览器访问已触发保护性回退',
-          description: `外网访问收到限制或超时，已通过内置知识引擎补充事实。${toolRes.error || ''}`,
+          title: '工具执行失败 (NETWORK_ERROR)',
+          description: `网络检索失败：${toolRes.error || '无法建立外部网络连接'}。系统坚守真实性原则，不伪造网络事实。`,
           timestamp: new Date().toISOString(),
-          status: 'warning',
+          status: 'error',
         });
       }
     } else if (isContractTask) {

@@ -13,6 +13,8 @@ import { globalArtifactBus } from './artifacts';
 import { globalExecutionTraceManager } from './execution-trace';
 import { globalSkillDb } from '../database/db';
 import { defaultModelAdapter } from '../model/adapter';
+import { globalSkillEngine } from './engine';
+import { globalSkillProjectStore } from './projectStore';
 
 export interface RuntimeExecutionOptions {
   signal?: AbortSignal;
@@ -78,19 +80,29 @@ export class ExecutionRuntime {
       );
 
       const durationMs = Date.now() - startTime;
-      const content = toolRes.result?.extractedContent || '';
-      const pageTitle = toolRes.result?.title || `检索：${keyword}`;
-      const url = toolRes.result?.url || 'https://html.duckduckgo.com';
 
-      // 2. Section 38: Register Evidence Reference
+      if (!toolRes.success) {
+        throw new Error(toolRes.error || '浏览器检索未获得成功返回 (NETWORK_ERROR)');
+      }
+
+      const content = toolRes.result?.extractedContent || '';
+      if (!content || content.trim().length === 0) {
+        throw new Error(`浏览器检索关键词「${keyword}」未获取到实质正文 (NO_CONTENT)`);
+      }
+
+      const pageTitle = toolRes.result?.title || `检索：${keyword}`;
+      const url = toolRes.result?.url || '';
+      const publishedAt = toolRes.result?.publishedAt || undefined;
+
+      // 2. Section 38: Register Source Evidence (Authentic Web Observation)
       const evidence = globalArtifactBus.registerEvidence(runId, {
         source: pageTitle,
         url,
         title: pageTitle,
-        publishedAt: '2026-08-15',
+        publishedAt, // authentic source timestamp if available, never hardcoded
         accessedAt: new Date().toISOString(),
         dataDate: cutoff,
-        claim: `全网动态观测：${content.slice(0, 100)}...`,
+        claim: `网络抓取证据摘要：${content.slice(0, 160).replace(/\s+/g, ' ')}...`,
         dataType: 'FACT',
         hasTemporalConflict: false,
       });
@@ -108,7 +120,6 @@ export class ExecutionRuntime {
           timestamp: new Date().toISOString(),
         },
         evidenceIds: [evidence.evidenceId],
-        confidence: 0.95,
       });
 
       // 4. Section 31: Record Execution Trace
@@ -176,99 +187,84 @@ export class ExecutionRuntime {
     const task = inputData?.task || '行业分析';
     const cutoff = options.researchCutoff || this.currentDate;
 
-    // Pull upstream artifacts from the Artifact Bus
+    // 1. Locate authentic external Skill definition from SkillEngine or ProjectStore
+    let externalSkill = step.skillId ? globalSkillEngine.getSkillById(step.skillId) : undefined;
+    if (!externalSkill) {
+      const allSkills = globalSkillEngine.getAllSkills();
+      externalSkill = allSkills.find((s) => s.name === skillName || s.displayName === skillName);
+    }
+
+    const skillSpecification = externalSkill?.content || '';
+    const skillReferences = (externalSkill?.files || [])
+      .filter((f) => f.path.includes('references/') || f.path.includes('templates/'))
+      .map((f) => `### 专项参考资料/规范模板: ${f.path}\n${f.content || ''}`)
+      .join('\n\n');
+
+    // 2. Pull upstream artifacts (both Web Intelligence and preceding upstream Specialty Artifacts)
     const upstreamArtifacts = globalArtifactBus.getArtifactsByRunId(runId);
-    const webIntel = upstreamArtifacts.find((a) => a.type === 'WebIntelligenceArtifact');
+    const relevantUpstream = upstreamArtifacts.filter((a) =>
+      step.dependsOn.includes(a.producerStepId) || a.type === 'WebIntelligenceArtifact'
+    );
 
-    const prompt = `你正在作为专项专业技能执行器执行：【${skillName}】。
-当前任务：${task}
-研究基准截止日期：${cutoff}（当前系统时间：${this.currentDate}）。
-已知权威一手事实输入：
-${webIntel ? JSON.stringify(webIntel.content) : '通过规范推演与行业权威公理分析'}
+    const prompt = `【执行专项外部技能】：${skillName}
+【外部技能完整规范 (SKILL.md)】：
+${skillSpecification || `技能名称: ${skillName}\n任务要求: 针对所指领域严格进行定量与定性推演`}
 
-【执行规范要求】：
-1. 严格针对本专项技能的核心职责展开测算与研判。
-2. 明确区分 FACT（已知事实）、FORECAST（预测数据与测算区间）、ESTIMATE（估算假设）。
-3. 给出结构化的关键量化指标（数值、单位、复合年增长率 CAGR）。
-4. 梳理主要瓶颈与投资机会洞察。
+${skillReferences ? `【作者配置的参考指引与模版】：\n${skillReferences}\n` : ''}
 
-请输出结构化 JSON，格式如下：
+【当前课题任务】：${task}
+【时间基准与截止日期】：${cutoff}（系统当前日期：${this.currentDate}）
+
+【前序节点产出与真实情报输入 (Upstream Artifacts)】：
+${relevantUpstream.length > 0
+  ? relevantUpstream.map((a) => `#### 产物：${a.name} (${a.type})\n${JSON.stringify(a.content, null, 2)}`).join('\n\n')
+  : '暂无前序产物，基于技能规范独立研判'}
+
+【执行指令与产出约束】：
+1. 必须完全遵循作者在 SKILL.md 中规定的研判方法、指标体系与分析步骤；
+2. 严谨区分已知事实 (FACT)、模型测算/预测 (FORECAST)、与分析师假设 (ESTIMATE)；
+3. 输出符合本专项职责的结构化结论。
+
+请输出标准 JSON：
 {
   "specialtyName": "${skillName}",
-  "keyMetrics": [{"name": "指标名称", "value": "数值", "type": "FACT/FORECAST/ESTIMATE", "benchmarkDate": "${cutoff}"}],
+  "keyMetrics": [{"name": "指标名称", "value": "数值及单位", "type": "FACT/FORECAST/ESTIMATE", "benchmarkDate": "${cutoff}"}],
   "coreFindings": ["核心结论1", "核心结论2", "核心结论3"],
+  "methodologyApplied": "所采用的具体分析方法与作者规范说明",
   "bottlenecksOrRisks": ["瓶颈/风险1", "瓶颈/风险2"],
   "businessOpportunities": ["商业机会1", "商业机会2"]
 }`;
 
     try {
-      let parsedContent: any;
-      try {
-        parsedContent = await defaultModelAdapter.generateStructured(prompt, {
-          modelName: 'gemini-2.5-flash',
-          temperature: 0.3,
-        });
-      } catch (genErr: any) {
-        console.warn(`[ExecutionRuntime] Specialty skill ${skillName} model busy/quota limit, engaging resilient fallback:`, genErr.message);
-        parsedContent = {
-          specialtyName: skillName,
-          keyMetrics: [
-            { name: `${skillName} 规模基准`, value: "预计超 500 亿元", type: "FORECAST", benchmarkDate: cutoff },
-            { name: "行业综合年增长率 (CAGR)", value: "31.8%", type: "FORECAST", benchmarkDate: cutoff },
-            { name: "核心成熟度与就绪度", value: "82.5%", type: "ESTIMATE", benchmarkDate: cutoff }
-          ],
-          coreFindings: [
-            `基于【${skillName}】专业方法论研判，关键技术正经历由实验室走向批量工程化的关键跃升。`,
-            `结合前序事实与检索证据，产业链关键零部件国产化与场景适配速度显著提升。`,
-            `产业投资与落地价值明确，具备高附加值与规模化平台属性。`
-          ],
-          bottlenecksOrRisks: [
-            `长周期测试认证与工程可靠性检验挑战`,
-            `行业标准规范尚未完全固化带来的路径选型风险`
-          ],
-          businessOpportunities: [
-            `面向典型工业/服务场景的定制化解决方案与集成服务`,
-            `产业链关键卡脖子元器件与高精度软硬件模块投资机会`
-          ]
-        };
-      }
+      const parsedContent = await defaultModelAdapter.generateStructured(prompt, {
+        modelName: 'gemini-2.5-flash',
+        temperature: 0.3,
+      });
 
       const durationMs = Date.now() - startTime;
 
-      // Register evidence if metrics found
-      const evidenceIds: string[] = [];
-      if (Array.isArray(parsedContent.keyMetrics)) {
-        for (const metric of parsedContent.keyMetrics.slice(0, 3)) {
-          const evi = globalArtifactBus.registerEvidence(runId, {
-            source: `${skillName} 专项测算模型`,
-            title: metric.name,
-            dataDate: metric.benchmarkDate || cutoff,
-            claim: `${metric.name}: ${metric.value}`,
-            dataType: metric.type || 'FORECAST',
-          });
-          evidenceIds.push(evi.evidenceId);
-        }
-      }
+      // Notice: Model-derived estimates or forecasts are NOT registered as external FACT Evidence!
+      // They belong to the Artifact content and its claims.
+      const inputArtifactIds = relevantUpstream.map((a) => a.artifactId);
 
       // Publish structured specialty artifact
       const artifact = globalArtifactBus.publishArtifact(runId, {
-        type: `${skillName}_Artifact`,
+        type: `${skillName.replace(/[^a-zA-Z0-9_]/g, '_')}_Artifact`,
         name: `${skillName}-专项研判底表`,
         producerStepId: step.stepId,
         producerSkillId: step.skillId,
         producerSkillName: skillName,
         content: parsedContent,
-        inputArtifactIds: webIntel ? [webIntel.artifactId] : [],
-        evidenceIds,
-        confidence: 0.96,
+        inputArtifactIds,
+        evidenceIds: [], // Keep clean: external facts only belong to source evidence
       });
 
       // Record Execution Trace
       globalExecutionTraceManager.recordTrace(runId, {
         stepId: step.stepId,
         action: `execute_skill:${skillName}`,
-        tool: 'Heterogeneous Skill Engine',
-        input: { skillName, task },
+        tool: externalSkill ? `Skill: ${externalSkill.name}` : 'Heterogeneous Skill Engine',
+        input: { skillName, task, hasAuthorSpec: !!skillSpecification },
         output: parsedContent,
         artifactIds: [artifact.artifactId],
         durationMs,
@@ -356,50 +352,61 @@ ${allEvidences.map((e) => `- [${e.dataType}] ${e.source} (${e.dataDate}): ${e.cl
     } catch (err: any) {
       console.warn('[ExecutionRuntime] Synthesis model busy/quota limit, compiling report directly from Artifact Bus:', err.message);
 
-      // Resilient synthesis directly compiled from all produced structured artifacts & evidence
-      reportText = `# ${task} 深度研究与战略投资评估报告
+      if (allArtifacts.length === 0) {
+        throw new Error(`交叉验证综合失败：未获得任何前序产物 (NO_ARTIFACTS)`);
+      }
+
+      // Compile report strictly from authentic artifacts produced in this run
+      const specialtyArtifacts = allArtifacts.filter((a) => a.type.endsWith('_Artifact'));
+      const metricsSummary: string[] = [];
+
+      for (const art of specialtyArtifacts) {
+        const c = art.content as any;
+        if (Array.isArray(c?.keyMetrics)) {
+          for (const m of c.keyMetrics) {
+            metricsSummary.push(`| ${art.producerSkillName || art.name} | ${m.name} | ${m.value} | ${m.type || 'ESTIMATE'} | ${m.benchmarkDate || cutoff} |`);
+          }
+        }
+      }
+
+      reportText = `# ${task} 深度研究与战略评估报告
 - **研究截止基准日期 (Cutoff Date)**: ${cutoff}
 - **执行时间**: ${this.currentDate}
-- **执行体系**: 个人 Agent 工作台 · 异构技能调度引擎 V0.3.2
+- **执行体系**: -Agent- Universal Skill Runtime V0.3.2
 
 ---
 
 ## 一、执行摘要与核心结论 (Executive Summary)
-针对【${task}】，Agent 调度多维度专项技能与全网检索工具，完成了端到端事实取证与深度交叉验证。研究表明该赛道正处于技术工程化突破与商业规模化验证的关键转折期。
+针对【${task}】，Runtime 调度了多维度外部技能并执行了结构化研判。以下内容全部汇聚自本次真实执行所产出的产物数据链。
 
-## 二、行业前沿态势与核心驱动要素 (Trends & Drivers)
-${allArtifacts.filter((a) => a.type.includes('Trend') || a.type.includes('Web')).map((a) => {
+## 二、前沿动态与一手事实采集
+${allArtifacts.filter((a) => a.type === 'WebIntelligenceArtifact').map((a) => {
   const c = a.content as any;
-  return `- **${a.name}**：${c?.extractedContent ? c.extractedContent.slice(0, 300) : JSON.stringify(c)}`;
-}).join('\n') || '- 核心驱动力源于政策红利引导、底层硬件算力成本下行及跨行业智能化改造的迫切需求。'}
+  return `- **${a.name}** [来源: ${c?.url || '网络'}]：\n  ${(c?.extractedContent || '').slice(0, 300)}...`;
+}).join('\n') || '- 本次任务未挂载或未检索外部动态，基于已载入知识库与专业规则推演。'}
 
-## 三、市场规模量化测算与预测区间 (Market Size & Forecast)
-| 评估维度 | 指标基准 | 预测口径 | 复合年增长率 (CAGR) | 数据类型 |
+## 三、专项技能指标汇总与量化分析
+${metricsSummary.length > 0 ? `| 专项技能来源 | 指标名称 | 数值/口径 | 数据属性 | 评估基准期 |
 | :--- | :--- | :--- | :--- | :--- |
-| 国内行业市场规模 | 超 580 亿元 | 2026-2030 | ~32.4% | FORECAST |
-| 核心供应链配套价值 | 约 210 亿元 | 2026基准 | ~28.6% | FACT / ESTIMATE |
-| 场景落地渗透率 | 14.5% | 规模试点期 | 持续加速 | ESTIMATE |
+${metricsSummary.join('\n')}` : '暂无结构化量化指标产出。'}
 
-## 四、核心供应链与技术成熟度研判 (Technology & Supply Chain)
-${allArtifacts.filter((a) => a.type.includes('Specialty') || a.type.includes('Supply') || a.type.includes('Skill')).map((a) => {
+## 四、各专项技能推演核心结论
+${specialtyArtifacts.map((a) => {
   const c = a.content as any;
-  const findings = Array.isArray(c?.coreFindings) ? c.coreFindings.join('；') : '';
-  return `### 【${a.name}】研判摘要\n- **核心发现**：${findings || '已具备规模化商用配套基础。'}\n- **主要壁垒/风险**：${Array.isArray(c?.bottlenecksOrRisks) ? c.bottlenecksOrRisks.join('；') : '研发周期与工程一致性控制。'}`;
-}).join('\n\n') || '- 关键元器件国产替代加速，但在高端控制算法、精密减速机及传感器融合层面仍需长期迭代。'}
-
-## 五、商业化落地场景与标杆试点 (Commercialization)
-- **工业制造与智慧物流**：物料搬运、高危质检与柔性装配场景率先起量；
-- **特种作业与商业服务**：电力巡检、导览接待与应急救援示范项目正在各主要产业园区铺开。
-
-## 六、适合大型产业投资开发企业的商业机会与实施路径建议 (Strategic Opportunities)
-1. **基础设施与场景赋能**：联合行业链主企业打造高规格「智能机器人+AI」产业孵化园区与共性测试平台；
-2. **供应链关键节点布局**：围绕传感器、伺服驱动等高毛利环节进行战略少数股权投资与生态绑定；
-3. **商业模式创新**：探索 RaaS（Robot-as-a-Service 机器人即服务）租赁与按效付费运营模式。
+  const findings = Array.isArray(c?.coreFindings) ? c.coreFindings.map((f: string) => `  - ${f}`).join('\n') : '';
+  const risks = Array.isArray(c?.bottlenecksOrRisks) ? c.bottlenecksOrRisks.map((r: string) => `  - ${r}`).join('\n') : '';
+  const opps = Array.isArray(c?.businessOpportunities) ? c.businessOpportunities.map((o: string) => `  - ${o}`).join('\n') : '';
+  return `### 【${a.name}】
+- **方法论/执行说明**：${c?.methodologyApplied || '已遵循作者规范执行'}
+- **核心研判**：\n${findings || '  - 已达成阶段性推演结论'}
+${risks ? `- **瓶颈与风险**：\n${risks}` : ''}
+${opps ? `- **机会与建议**：\n${opps}` : ''}`;
+}).join('\n\n') || '- 暂无专项技能研判产出。'}
 
 ---
 
-## 七、证据链与数据溯源索引 (Evidence Ledger)
-${allEvidences.map((e) => `- [${e.dataType}] **${e.source}** (${e.dataDate}): ${e.claim}`).join('\n') || '- 全部研判均经 Agent 事实提取与质量自检通过。'}
+## 五、证据链溯源索引 (Evidence Ledger)
+${allEvidences.map((e) => `- [${e.dataType}] **${e.source}** (${e.dataDate || cutoff}): ${e.claim}`).join('\n') || '- 本次执行未生成外部 Source Evidence 记录。'}
 `;
     }
 
@@ -471,15 +478,10 @@ ${allEvidences.map((e) => `- [${e.dataType}] **${e.source}** (${e.dataDate}): ${
 请给出该任务的明确研究边界与分析框架拆解：`;
 
       try {
-        let out = '';
-        try {
-          out = await defaultModelAdapter.generateText(prompt, {
-            modelName: 'gemini-2.5-flash',
-            temperature: 0.3,
-          });
-        } catch {
-          out = `已完成任务「${(step.input as any)?.task || ''}」范围界定：涵盖前沿动态、规模测算、产业链与投资建议。`;
-        }
+        const out = await defaultModelAdapter.generateText(prompt, {
+          modelName: 'gemini-2.5-flash',
+          temperature: 0.3,
+        });
         const durationMs = Date.now() - startTime;
 
         const art = globalArtifactBus.publishArtifact(runId, {
