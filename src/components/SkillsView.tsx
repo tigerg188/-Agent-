@@ -36,6 +36,9 @@ import {
   Database,
   Clock,
   Activity,
+  Download,
+  Copy,
+  Code,
 } from 'lucide-react';
 import {
   SkillMetadata,
@@ -85,6 +88,15 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
   const [runtimeExecutionResult, setRuntimeExecutionResult] = useState<any | null>(null);
   const [traceDetailModal, setTraceDetailModal] = useState<any | null>(null);
   const [runtimeProfile, setRuntimeProfile] = useState<any | null>(null);
+
+  // Full Process Visual Log Modal state
+  const [visualLogModalRun, setVisualLogModalRun] = useState<any | null>(null);
+  const isVisualLogOpen = Boolean(visualLogModalRun);
+  const setIsVisualLogOpen = (open: boolean) => { if (!open) setVisualLogModalRun(null); };
+  const visualLogData = visualLogModalRun;
+  const [activeLogTab, setActiveLogTab] = useState<'timeline' | 'steps' | 'traces' | 'artifacts' | 'raw'>('timeline');
+  const [visualLogFilter, setVisualLogFilter] = useState<'all' | 'model' | 'tool' | 'error'>('all');
+  const [isLoadingVisualLog, setIsLoadingVisualLog] = useState(false);
 
 
   // Discovery input states
@@ -195,6 +207,155 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
     }
   };
 
+  const handleDownloadLogJson = async (runDetailOrId: any) => {
+    if (!runDetailOrId) return;
+    let payload = runDetailOrId;
+    const runId = typeof runDetailOrId === 'string' ? runDetailOrId : (runDetailOrId.run?.runId || runDetailOrId.runId || 'run');
+    if (typeof runDetailOrId === 'string') {
+      try {
+        payload = await api.getRuntimeRun(runDetailOrId);
+      } catch (e: any) {
+        setErrorMessage('获取运行数据失败: ' + e.message);
+        return;
+      }
+    }
+    const jsonStr = JSON.stringify(payload, null, 2);
+    const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `DAG-Execution-Log-${runId.slice(0, 18)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setSuccessMessage('全流程可视化日志 (JSON) 已下载');
+  };
+
+  const handleDownloadLogText = async (runDetailOrId: any) => {
+    if (!runDetailOrId) return;
+    let runDetail = runDetailOrId;
+    if (typeof runDetailOrId === 'string') {
+      try {
+        runDetail = await api.getRuntimeRun(runDetailOrId);
+      } catch (e: any) {
+        setErrorMessage('获取运行数据失败: ' + e.message);
+        return;
+      }
+    }
+    const run = runDetail.run || runDetail;
+    const steps = runDetail.steps || [];
+    const traces = runDetail.traces || [];
+    const artifacts = runDetail.artifacts || [];
+    const evidence = runDetail.evidence || [];
+    const runId = run.runId || 'run';
+
+    const textContent = [
+      `================================================================================`,
+      `UNIVERSAL SKILL RUNTIME - 全方位全流程可视化执行日志`,
+      `================================================================================`,
+      `Run ID: ${run.runId}`,
+      `研究任务: ${run.task}`,
+      `执行状态: ${run.status}`,
+      `研究基准截止期: ${run.researchCutoff || '2026-09-24'}`,
+      `启动时间: ${run.startedAt}`,
+      `完成时间: ${run.finishedAt || '已完成'}`,
+      `执行耗时: ${run.durationMs ? `${(run.durationMs / 1000).toFixed(1)}s` : '正常完成'}`,
+      `生成产物总数: ${artifacts.length} 项`,
+      `工具与大模型轨迹数: ${traces.length} 条`,
+      `一手事实证据数: ${evidence.length} 条`,
+      `================================================================================\n`,
+      `[一、DAG 拓扑执行步骤清单 (${steps.length})]`,
+      ...steps.map((s: any, idx: number) => 
+        `--------------------------------------------------------------------------------\n` +
+        `步骤 ${idx + 1}: [${(s.status || 'SUCCESS').toUpperCase()}] ${s.stepId} - ${s.title}\n` +
+        `  执行动作: ${s.action} | 调度技能: ${s.skillName || '核心引擎'}\n` +
+        `  前序依赖: ${(s.dependsOn || []).join(', ') || '无 (顶层拓扑)'}\n` +
+        `  期望产出: ${s.expectedOutput || '结构化分析成果'}\n` +
+        `  执行耗时: ${s.startedAt && s.completedAt ? `${new Date(s.completedAt).getTime() - new Date(s.startedAt).getTime()}ms` : '已完成'}\n` +
+        (s.error ? `  [异常信息]: ${JSON.stringify(s.error)}\n` : '')
+      ),
+      `\n[二、真实大模型推理与工具调用轨迹 (${traces.length})]`,
+      ...traces.map((t: any, idx: number) =>
+        `--------------------------------------------------------------------------------\n` +
+        `轨迹 #${idx + 1}: [${t.status || 'SUCCESS'}] ${t.actionType || t.action || 'Action'} (${t.toolName || t.tool || 'Heterogeneous Runtime'})\n` +
+        `  时间戳: ${t.timestamp || new Date().toISOString()} | 真实延迟: ${t.durationMs || 0}ms\n` +
+        `  输入参数: ${t.inputSnippet || JSON.stringify(t.input || {})}\n` +
+        `  输出结果: ${t.outputSnippet || (typeof t.output === 'string' ? t.output.slice(0, 500) : JSON.stringify(t.output)?.slice(0, 500))}\n` +
+        (t.error ? `  [错误信息]: ${t.error}\n` : '')
+      ),
+      `\n[三、产物总线 (Artifact Bus) 注册台账 (${artifacts.length})]`,
+      ...artifacts.map((a: any, idx: number) =>
+        `--------------------------------------------------------------------------------\n` +
+        `产物 #${idx + 1}: ${a.name} (${a.type})\n` +
+        `  产物 ID: ${a.artifactId || a.id} | 生产步骤: ${a.producerStepId || a.stepId}\n` +
+        `  归属技能: ${a.producerSkillName || '通用框架'} | 置信度: ${a.confidence || 1.0}\n` +
+        `  内容摘要: ${typeof a.content === 'string' ? a.content.slice(0, 300) : JSON.stringify(a.content)?.slice(0, 300)}...\n`
+      ),
+      `\n[四、真实证据链溯源索引 (${evidence.length})]`,
+      ...evidence.map((e: any, idx: number) =>
+        `[证据 #${idx + 1}] [${e.dataType || 'FACT'}] ${e.sourceTitle || e.source || '来源'} (${e.dataDate || '基准期'}): ${e.claim || e.excerpt || ''}\n  URL: ${e.sourceUrl || e.url || '网络权威源'}\n`
+      ),
+      `\n================================================================================`,
+      `[五、最终成果交付研报全文]`,
+      `================================================================================\n`,
+      runDetail.finalReportMarkdown || runDetail.output || '研报已由 Artifact Bus 归档并完成交叉验证。',
+      `\n================================================================================\n`
+    ].join('\n');
+
+    const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `DAG-Execution-Trace-${runId.slice(0, 18)}.log`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setSuccessMessage('全流程结构化运行日志 (.log) 已下载');
+  };
+
+  const handleDownloadReportMarkdown = (markdown: string, taskTitle = '研究报告') => {
+    if (!markdown) {
+      setErrorMessage('当前运行尚未生成最终研报 Markdown 内容');
+      return;
+    }
+    const cleanTitle = (taskTitle || '交付研报').slice(0, 25).replace(/[/\\?%*:|"<>]/g, '_');
+    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${cleanTitle}-深度研报.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setSuccessMessage('完整交付研报 (.md) 已下载');
+  };
+
+  const handleOpenVisualLog = async (runIdOrDetail: string | any) => {
+    setIsLoadingVisualLog(true);
+    try {
+      if (typeof runIdOrDetail === 'string') {
+        const detail = await api.getRuntimeRun(runIdOrDetail);
+        setVisualLogModalRun(detail);
+      } else if (runIdOrDetail?.runId && !runIdOrDetail.run) {
+        const detail = await api.getRuntimeRun(runIdOrDetail.runId);
+        setVisualLogModalRun({
+          ...detail,
+          finalReportMarkdown: runIdOrDetail.finalReportMarkdown || detail.finalReportMarkdown,
+        });
+      } else {
+        setVisualLogModalRun(runIdOrDetail);
+      }
+      setActiveLogTab('timeline');
+    } catch (e: any) {
+      setErrorMessage('加载全流程可视化日志失败: ' + e.message);
+    } finally {
+      setIsLoadingVisualLog(false);
+    }
+  };
+
   const loadProjects = async () => {
     setIsLoadingProjects(true);
     try {
@@ -223,7 +384,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
     setIsRepairingEnv(true);
     setErrorMessage(null);
     try {
-      const comps = components || (envReport?.checks.filter((c) => c.status !== 'READY').map((c) => c.component) || ['python', 'browser']);
+      const comps = components || ((envReport?.checks || []).filter((c) => c.status !== 'READY').map((c) => c.component) || ['python', 'browser']);
       const result = await api.repairEnvironment(comps);
       setSuccessMessage(`环境适配完成：${result.messages.join('；')}`);
       await loadEnvironment();
@@ -567,27 +728,29 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                       </div>
 
                       {/* Main Entry Info */}
-                      <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100 space-y-1">
-                        <div className="flex items-center justify-between text-2xs font-semibold text-slate-400">
-                          <span className="flex items-center gap-1 text-indigo-600">
-                            <Compass className="w-3 h-3" />
-                            <span>主入口 / 总路由</span>
-                          </span>
-                          <span className="font-mono text-slate-400">{mainEntry.path}</span>
+                      {mainEntry && (
+                        <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100 space-y-1">
+                          <div className="flex items-center justify-between text-2xs font-semibold text-slate-400">
+                            <span className="flex items-center gap-1 text-indigo-600">
+                              <Compass className="w-3 h-3" />
+                              <span>主入口 / 总路由</span>
+                            </span>
+                            <span className="font-mono text-slate-400">{mainEntry.path || ''}</span>
+                          </div>
+                          <div className="text-xs font-bold text-slate-800 truncate">
+                            {mainEntry.displayName || mainEntry.name || '默认入口'}
+                          </div>
                         </div>
-                        <div className="text-xs font-bold text-slate-800 truncate">
-                          {mainEntry.displayName || mainEntry.name}
-                        </div>
-                      </div>
+                      )}
 
                       {/* Child Skills Preview (if pack) */}
-                      {isPack && (
+                      {isPack && project.projectMap?.childSkills && (
                         <div className="space-y-1.5">
                           <div className="text-2xs font-bold text-slate-400 tracking-wider">
-                            下属专项技能分支 ({project.projectMap.childSkills.length})
+                            下属专项技能分支 ({(project.projectMap.childSkills || []).length})
                           </div>
                           <div className="flex flex-wrap gap-1.5">
-                            {project.projectMap.childSkills.slice(0, 4).map((c) => (
+                            {(project.projectMap.childSkills || []).slice(0, 4).map((c) => (
                               <span
                                 key={c.id}
                                 className="px-2 py-0.5 rounded-lg text-2xs bg-indigo-50 border border-indigo-100 text-indigo-700 font-medium truncate max-w-[140px]"
@@ -596,9 +759,9 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                                 {c.displayName || c.name}
                               </span>
                             ))}
-                            {project.projectMap.childSkills.length > 4 && (
+                            {(project.projectMap.childSkills || []).length > 4 && (
                               <span className="px-1.5 py-0.5 rounded-lg text-2xs bg-slate-100 text-slate-500">
-                                +{project.projectMap.childSkills.length - 4}
+                                +{(project.projectMap.childSkills || []).length - 4}
                               </span>
                             )}
                           </div>
@@ -609,15 +772,15 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                       <div className="flex items-center gap-3 text-2xs text-slate-400 pt-1">
                         <span className="flex items-center gap-1">
                           <Wrench className="w-3 h-3 text-slate-500" />
-                          <span>{project.projectMap.requiredTools.length} 项工具</span>
+                          <span>{(project.projectMap?.requiredTools || []).length} 项工具</span>
                         </span>
                         <span className="flex items-center gap-1">
                           <Folder className="w-3 h-3 text-slate-500" />
-                          <span>{project.resourcesCount} 项资产文件</span>
+                          <span>{project.resourcesCount || 0} 项资产文件</span>
                         </span>
                         <span className="flex items-center gap-1">
                           <CheckCircle2 className="w-3 h-3 text-emerald-500" />
-                          <span>{project.compatibility.status === 'FULL' ? '100% 完整' : '部分就绪'}</span>
+                          <span>{project.compatibility?.status === 'FULL' ? '100% 完整' : '部分就绪'}</span>
                         </span>
                       </div>
                     </div>
@@ -870,7 +1033,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {envReport.checks.map((check) => {
+                {(envReport.checks || []).map((check) => {
                   const isOk = check.status === 'READY';
                   return (
                     <div
@@ -978,7 +1141,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                     onChange={(e) => setSelectedProjectForRun(e.target.value)}
                     className="px-2.5 py-1.5 rounded-xl border border-slate-200 text-xs bg-slate-50 font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
-                    {projects.map((p) => (
+                    {(projects || []).map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.displayName || p.name}
                       </option>
@@ -1062,14 +1225,14 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                   <div className="text-xs font-bold text-slate-800 flex items-center gap-2">
                     <span>DAG 执行计划已就绪</span>
                     <span className="px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 text-2xs font-mono font-semibold">
-                      {plannedPlan.steps.length} 个步骤 · {plannedPlan.parallelGroups?.length || 1} 层拓扑批次
+                      {(plannedPlan.steps || []).length} 个步骤 · {plannedPlan.parallelGroups?.length || 1} 层拓扑批次
                     </span>
                   </div>
                   <span className="text-2xs text-slate-400 font-mono">Plan ID: {plannedPlan.planId}</span>
                 </div>
 
                 <div className="space-y-2">
-                  {plannedPlan.steps.map((st: any, idx: number) => {
+                  {(plannedPlan.steps || []).map((st: any, idx: number) => {
                     return (
                       <div
                         key={st.stepId}
@@ -1134,7 +1297,35 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => handleOpenVisualLog(runtimeExecutionResult.runId)}
+                    className="px-3.5 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all"
+                  >
+                    <Activity className="w-3.5 h-3.5" />
+                    <span>全流程可视化日志</span>
+                  </button>
+
+                  <button
+                    onClick={() => handleDownloadLogJson(runtimeExecutionResult.runId)}
+                    className="px-3 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center gap-1.5 transition-all"
+                    title="下载全流程结构化运行审计 JSON"
+                  >
+                    <Download className="w-3.5 h-3.5 text-blue-600" />
+                    <span>下载日志 (JSON)</span>
+                  </button>
+
+                  {runtimeExecutionResult.finalReportMarkdown && (
+                    <button
+                      onClick={() => handleDownloadReportMarkdown(runtimeExecutionResult.runId, runtimeExecutionResult.finalReportMarkdown)}
+                      className="px-3 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center gap-1.5 transition-all"
+                      title="下载最终综合研究交付物 Markdown"
+                    >
+                      <Download className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>下载报告 (MD)</span>
+                    </button>
+                  )}
+
                   <button
                     onClick={() => {
                       if (runtimeExecutionResult.finalReportMarkdown) {
@@ -1142,22 +1333,23 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                         setSuccessMessage('报告 Markdown 已复制到剪贴板！');
                       }
                     }}
-                    className="px-3.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 transition-all"
+                    className="px-3 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center gap-1.5 transition-all"
                   >
-                    复制报告 Markdown
+                    <Copy className="w-3.5 h-3.5 text-slate-500" />
+                    <span>复制报告</span>
                   </button>
                 </div>
               </div>
 
               {/* Artifacts List */}
-              {runtimeExecutionResult.artifacts && runtimeExecutionResult.artifacts.length > 0 && (
+              {runtimeExecutionResult.artifacts && (runtimeExecutionResult.artifacts || []).length > 0 && (
                 <div className="space-y-2">
                   <h4 className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
                     <Database className="w-3.5 h-3.5 text-blue-600" />
                     <span>产物总线 (Artifact Bus) 注册清单：</span>
                   </h4>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {runtimeExecutionResult.artifacts.map((art: any) => (
+                    {(runtimeExecutionResult.artifacts || []).map((art: any) => (
                       <div
                         key={art.id}
                         className="p-3.5 rounded-2xl border border-slate-200 bg-slate-50/70 flex items-center justify-between gap-3 text-xs"
@@ -1221,13 +1413,13 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
               </button>
             </div>
 
-            {runtimeRuns.length === 0 ? (
+            {(runtimeRuns || []).length === 0 ? (
               <div className="py-10 text-center text-slate-400 text-xs">
                 暂无历史执行记录。在上方输入 Prompt 点击「2. 真实执行 DAG 编排」即可启动首次运行。
               </div>
             ) : (
               <div className="space-y-2">
-                {runtimeRuns.map((r: any) => (
+                {(runtimeRuns || []).map((r: any) => (
                   <div
                     key={r.runId}
                     className="p-4 rounded-2xl border border-slate-200 hover:border-slate-300 transition-all flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs"
@@ -1256,12 +1448,32 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                       </div>
                     </div>
 
-                    <button
-                      onClick={() => handleInspectRun(r.runId)}
-                      className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold shrink-0"
-                    >
-                      查看审计详情
-                    </button>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        onClick={() => handleOpenVisualLog(r.runId)}
+                        className="px-3 py-1.5 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-700 text-xs font-semibold flex items-center gap-1 transition-all"
+                        title="查看该次运行的全流程可视化诊断与追踪日志"
+                      >
+                        <Activity className="w-3.5 h-3.5" />
+                        <span>可视化日志</span>
+                      </button>
+
+                      <button
+                        onClick={() => handleDownloadLogJson(r.runId)}
+                        className="px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-medium flex items-center gap-1 transition-all"
+                        title="导出完整 JSON 日志"
+                      >
+                        <Download className="w-3.5 h-3.5 text-slate-500" />
+                        <span>下载</span>
+                      </button>
+
+                      <button
+                        onClick={() => handleInspectRun(r.runId)}
+                        className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold"
+                      >
+                        审计详情
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1282,12 +1494,28 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                       任务：{selectedRunDetail.run.task}
                     </p>
                   </div>
-                  <button
-                    onClick={() => setSelectedRunDetail(null)}
-                    className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleOpenVisualLog(selectedRunDetail.run.runId)}
+                      className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold flex items-center gap-1.5 transition-all"
+                    >
+                      <Activity className="w-3.5 h-3.5" />
+                      <span>打开全流程可视化日志</span>
+                    </button>
+                    <button
+                      onClick={() => handleDownloadLogJson(selectedRunDetail.run.runId)}
+                      className="px-3 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-medium flex items-center gap-1.5 transition-all"
+                    >
+                      <Download className="w-3.5 h-3.5 text-blue-600" />
+                      <span>下载完整日志</span>
+                    </button>
+                    <button
+                      onClick={() => setSelectedRunDetail(null)}
+                      className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="p-6 overflow-y-auto flex-1 space-y-5 text-xs">
@@ -1298,7 +1526,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                       <span>真实工具与动作执行轨迹 (Execution Traces)</span>
                     </h4>
                     <div className="space-y-1.5">
-                      {selectedRunDetail.traces.map((tr: any) => (
+                      {(selectedRunDetail.traces || []).map((tr: any) => (
                         <div
                           key={tr.traceId}
                           className="p-3 rounded-xl border border-slate-200 bg-slate-50 font-mono text-2xs space-y-1"
@@ -1324,10 +1552,10 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                   <div className="space-y-2">
                     <h4 className="font-bold text-slate-800 flex items-center gap-2">
                       <Database className="w-3.5 h-3.5 text-emerald-600" />
-                      <span>产生的结构化产物 ({selectedRunDetail.artifacts.length})</span>
+                      <span>产生的结构化产物 ({(selectedRunDetail.artifacts || []).length})</span>
                     </h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                      {selectedRunDetail.artifacts.map((a: any) => (
+                      {(selectedRunDetail.artifacts || []).map((a: any) => (
                         <div
                           key={a.id}
                           className="p-3 rounded-xl border border-slate-200 bg-white flex items-center justify-between"
@@ -1350,14 +1578,14 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                   </div>
 
                   {/* Evidence References */}
-                  {selectedRunDetail.evidence && selectedRunDetail.evidence.length > 0 && (
+                  {selectedRunDetail.evidence && (selectedRunDetail.evidence || []).length > 0 && (
                     <div className="space-y-2">
                       <h4 className="font-bold text-slate-800 flex items-center gap-2">
                         <Shield className="w-3.5 h-3.5 text-amber-600" />
                         <span>真实证据引用链 (Evidence References)</span>
                       </h4>
                       <div className="space-y-1.5">
-                        {selectedRunDetail.evidence.map((ev: any) => (
+                        {(selectedRunDetail.evidence || []).map((ev: any) => (
                           <div
                             key={ev.id}
                             className="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-1 text-2xs"
@@ -1403,10 +1631,10 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                     <div>关联一手证据: {traceDetailModal.evidenceRefs?.length || 0} 项</div>
                   </div>
 
-                  {traceDetailModal.evidenceRefs && traceDetailModal.evidenceRefs.length > 0 && (
+                  {traceDetailModal.evidenceRefs && (traceDetailModal.evidenceRefs || []).length > 0 && (
                     <div className="space-y-1.5">
                       <div className="font-bold text-slate-700 text-2xs">支持证据来源：</div>
-                      {traceDetailModal.evidenceRefs.map((ev: any) => (
+                      {(traceDetailModal.evidenceRefs || []).map((ev: any) => (
                         <div key={ev.id} className="p-2.5 rounded-lg border border-slate-200 text-2xs space-y-0.5">
                           <div className="font-semibold text-blue-600 truncate">{ev.sourceUrl || ev.sourceTitle}</div>
                           <div className="text-slate-500 line-clamp-2">{ev.excerpt}</div>
@@ -1426,13 +1654,13 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
         <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-xs space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-slate-800">
-              所有细分子技能平铺视图 ({skills.length} 项)
+              所有细分子技能平铺视图 ({(skills || []).length} 项)
             </h2>
             <span className="text-xs text-slate-400">包含主入口与已展开的所有子技能</span>
           </div>
 
           <div className="divide-y divide-slate-100">
-            {skills.map((skill) => (
+            {(skills || []).map((skill) => (
               <div key={skill.id} className="py-3 flex items-center justify-between gap-4">
                 <div className="space-y-0.5">
                   <div className="flex items-center gap-2">
@@ -1597,11 +1825,11 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                           {previewResult.projectMap.childSkills.length} 个
                         </span>
                       </div>
-                      {previewResult.projectMap.childSkills.length === 0 ? (
+                      {(previewResult.projectMap?.childSkills || []).length === 0 ? (
                         <p className="text-xs text-slate-400 italic">单体规范技能，未包含下属分支</p>
                       ) : (
                         <div className="space-y-1.5 max-h-36 overflow-y-auto">
-                          {previewResult.projectMap.childSkills.map((c) => (
+                          {(previewResult.projectMap?.childSkills || []).map((c) => (
                             <div key={c.id} className="p-2 rounded-xl bg-white border border-slate-100 text-xs flex items-center justify-between">
                               <span className="font-semibold text-slate-800">{c.displayName || c.name}</span>
                               <span className="text-2xs text-indigo-600 font-medium">{c.role}</span>
@@ -1617,16 +1845,16 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                     <div className="p-4 rounded-2xl border border-slate-200 space-y-1.5">
                       <div className="text-2xs font-bold text-slate-400 uppercase">Supporting Resources</div>
                       <div className="text-xs text-slate-700 space-y-1">
-                        <div>参考指引: {previewResult.projectMap.supportingResources.references.length} 篇</div>
-                        <div>模版文件: {previewResult.projectMap.supportingResources.templates.length} 份</div>
-                        <div>工具脚本: {previewResult.projectMap.supportingResources.scripts.length} 个</div>
+                        <div>参考指引: {(previewResult.projectMap?.supportingResources?.references || []).length} 篇</div>
+                        <div>模版文件: {(previewResult.projectMap?.supportingResources?.templates || []).length} 份</div>
+                        <div>工具脚本: {(previewResult.projectMap?.supportingResources?.scripts || []).length} 个</div>
                       </div>
                     </div>
 
                     <div className="p-4 rounded-2xl border border-slate-200 space-y-1.5">
                       <div className="text-2xs font-bold text-slate-400 uppercase">所需外部工具 / MCP</div>
                       <div className="text-xs text-slate-700 space-y-1">
-                        {previewResult.projectMap.requiredTools.map((t, idx) => (
+                        {(previewResult.projectMap?.requiredTools || []).map((t, idx) => (
                           <div key={idx} className="flex items-center gap-1 text-slate-800">
                             <Wrench className="w-3 h-3 text-blue-500" />
                             <span className="truncate">{t}</span>
@@ -1640,10 +1868,10 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                       <div className="text-xs">
                         <div className="font-bold text-slate-800 flex items-center gap-1">
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-                          <span>{previewResult.compatibilityReport.levelTitle}</span>
+                          <span>{previewResult.compatibilityReport?.levelTitle || '兼容审计'}</span>
                         </div>
                         <p className="text-2xs text-slate-500 mt-1 leading-relaxed">
-                          {previewResult.compatibilityReport.summary}
+                          {previewResult.compatibilityReport?.summary || '通过检查'}
                         </p>
                       </div>
                     </div>
@@ -1656,7 +1884,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                 <div className="space-y-4">
                   <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 text-xs text-slate-600 flex items-center justify-between">
                     <div>
-                      拓扑结构类型：<span className="font-bold text-slate-900">{previewResult.projectMap.relationshipGraph.structureType}</span>{' '}
+                      拓扑结构类型：<span className="font-bold text-slate-900">{previewResult.projectMap?.relationshipGraph?.structureType || 'direct'}</span>{' '}
                       (主入口统筹调度各子模块协同作业)
                     </div>
                     <span className="text-2xs text-slate-400">无环有向图模型</span>
@@ -1668,8 +1896,8 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                     <div className="flex justify-center">
                       <div className="p-4 rounded-2xl bg-indigo-600 text-white border-2 border-indigo-400 shadow-lg text-center max-w-sm w-full">
                         <div className="text-2xs uppercase tracking-wider text-indigo-200 font-bold">总入口 / Router</div>
-                        <div className="text-sm font-bold mt-0.5">{previewResult.projectMap.mainEntry.displayName || previewResult.projectMap.mainEntry.name}</div>
-                        <div className="text-2xs text-indigo-100 font-mono mt-1">{previewResult.projectMap.mainEntry.path}</div>
+                        <div className="text-sm font-bold mt-0.5">{previewResult.projectMap?.mainEntry?.displayName || previewResult.projectMap?.mainEntry?.name}</div>
+                        <div className="text-2xs text-indigo-100 font-mono mt-1">{previewResult.projectMap?.mainEntry?.path}</div>
                       </div>
                     </div>
 
@@ -1679,9 +1907,9 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                     </div>
 
                     {/* Child Skills Grid */}
-                    {previewResult.projectMap.childSkills.length > 0 ? (
+                    {(previewResult.projectMap?.childSkills || []).length > 0 ? (
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                        {previewResult.projectMap.childSkills.map((child) => (
+                        {(previewResult.projectMap?.childSkills || []).map((child) => (
                           <div
                             key={child.id}
                             className="p-3 rounded-xl bg-slate-800 border border-slate-700 text-center space-y-1 hover:border-indigo-400 transition-all"
@@ -1703,7 +1931,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
 
                     {/* Tools & Outputs */}
                     <div className="flex items-center justify-center gap-4 flex-wrap">
-                      {previewResult.projectMap.requiredTools.map((tool, idx) => (
+                      {(previewResult.projectMap?.requiredTools || []).map((tool, idx) => (
                         <div key={idx} className="px-3 py-1.5 rounded-xl bg-slate-800/80 border border-emerald-500/30 text-emerald-400 text-2xs font-semibold flex items-center gap-1.5">
                           <Wrench className="w-3 h-3" />
                           <span>{tool}</span>
@@ -1723,7 +1951,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                       <span>作者预期目标 (Author Intent)</span>
                     </div>
                     <p className="text-xs text-purple-950/80 leading-relaxed">
-                      {previewResult.runtimeIntent.authorIntent}
+                      {previewResult.runtimeIntent?.authorIntent}
                     </p>
                   </div>
 
@@ -1731,7 +1959,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                   <div className="space-y-2">
                     <div className="text-xs font-bold text-slate-800">4步系统化执行次序 (Execution Sequence)：</div>
                     <div className="space-y-2">
-                      {previewResult.runtimeIntent.sequence.map((step) => (
+                      {(previewResult.runtimeIntent?.sequence || []).map((step) => (
                         <div key={step.stepNumber} className="p-3.5 rounded-2xl border border-slate-200 bg-white flex items-start gap-3 text-xs">
                           <div className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 font-bold flex items-center justify-center shrink-0 text-xs">
                             {step.stepNumber}
@@ -1754,7 +1982,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                         <span>质量与验证标准</span>
                       </div>
                       <div className="space-y-1 text-2xs text-slate-600">
-                        {previewResult.runtimeIntent.verification.map((v, i) => (
+                        {(previewResult.runtimeIntent?.verification || []).map((v, i) => (
                           <div key={i} className="flex items-start gap-1">
                             <span className="text-emerald-500 font-bold">•</span>
                             <span>{v.check}: {v.standard}</span>
@@ -1769,7 +1997,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                         <span>约束与边界控制</span>
                       </div>
                       <div className="space-y-1 text-2xs text-slate-600">
-                        {previewResult.runtimeIntent.constraints.map((c, i) => (
+                        {(previewResult.runtimeIntent?.constraints || []).map((c, i) => (
                           <div key={i} className="flex items-start gap-1">
                             <span className="text-amber-500 font-bold">•</span>
                             <span>{c}</span>
@@ -1785,10 +2013,10 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
               {previewActiveTab === 'files' && (
                 <div className="space-y-3">
                   <div className="text-xs text-slate-500">
-                    完整扫描到 {previewResult.scannedFiles.length} 个原始文件，这些文件保持原样，未经任何篡改：
+                    完整扫描到 {(previewResult.scannedFiles || []).length} 个原始文件，这些文件保持原样，未经任何篡改：
                   </div>
                   <div className="border border-slate-200 rounded-2xl divide-y divide-slate-100 max-h-72 overflow-y-auto text-xs font-mono">
-                    {previewResult.scannedFiles.map((file, idx) => (
+                    {(previewResult.scannedFiles || []).map((file, idx) => (
                       <div key={idx} className="p-2.5 flex items-center justify-between hover:bg-slate-50">
                         <span className="text-slate-800 truncate">{file.path}</span>
                         <span className="text-2xs text-slate-400 shrink-0">{(file.size / 1024).toFixed(1)} KB</span>
@@ -1799,14 +2027,14 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
               )}
 
               {/* Diagnostic Logs (if installing or finished) */}
-              {diagnosticSteps.length > 0 && (
+              {(diagnosticSteps || []).length > 0 && (
                 <div className="p-5 rounded-2xl bg-slate-900 text-white space-y-3">
                   <div className="text-xs font-bold text-slate-200 flex items-center gap-2">
                     <Terminal className="w-4 h-4 text-emerald-400" />
                     <span>安装与拓扑挂载进度日志</span>
                   </div>
                   <div className="space-y-2">
-                    {diagnosticSteps.map((log, index) => (
+                    {(diagnosticSteps || []).map((log, index) => (
                       <div key={index} className="flex items-start gap-2.5 text-xs">
                         {log.status === 'success' ? (
                           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
@@ -1956,7 +2184,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                 }`}
               >
                 <Folder className="w-4 h-4" />
-                <span>原项目文件浏览 ({inspectingProject.originalFiles.length})</span>
+                <span>原项目文件浏览 ({(inspectingProject.originalFiles || []).length})</span>
               </button>
             </div>
 
@@ -1968,17 +2196,17 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                   <div className="p-4 rounded-2xl bg-blue-50/50 border border-blue-200 space-y-2">
                     <div className="text-2xs font-bold text-blue-700 tracking-wider">项目主入口 / 总路由</div>
                     <div className="text-sm font-bold text-slate-900">
-                      {inspectingProject.projectMap.mainEntry.displayName || inspectingProject.projectMap.mainEntry.name}
+                      {inspectingProject.projectMap?.mainEntry?.displayName || inspectingProject.projectMap?.mainEntry?.name}
                     </div>
-                    <p className="text-xs text-slate-600">{inspectingProject.projectMap.mainEntry.description}</p>
-                    <div className="text-2xs font-mono text-slate-400">规范文件：{inspectingProject.projectMap.mainEntry.path}</div>
+                    <p className="text-xs text-slate-600">{inspectingProject.projectMap?.mainEntry?.description}</p>
+                    <div className="text-2xs font-mono text-slate-400">规范文件：{inspectingProject.projectMap?.mainEntry?.path}</div>
                   </div>
 
                   {/* Child skills list */}
                   <div className="space-y-2">
                     <div className="text-xs font-bold text-slate-800">下属专项子分支：</div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      {inspectingProject.projectMap.childSkills.map((c) => (
+                      {(inspectingProject.projectMap?.childSkills || []).map((c) => (
                         <div key={c.id} className="p-3.5 rounded-2xl border border-slate-200 bg-white space-y-1">
                           <div className="flex items-center justify-between">
                             <span className="text-xs font-bold text-slate-800">{c.displayName || c.name}</span>
@@ -1999,7 +2227,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                 <div className="p-6 rounded-3xl bg-slate-900 text-white space-y-6 text-center">
                   <div className="inline-block p-4 rounded-2xl bg-indigo-600 border border-indigo-400 shadow-md">
                     <div className="text-2xs uppercase text-indigo-200 font-bold">总路由主入口</div>
-                    <div className="text-sm font-bold mt-0.5">{inspectingProject.projectMap.mainEntry.displayName}</div>
+                    <div className="text-sm font-bold mt-0.5">{inspectingProject.projectMap?.mainEntry?.displayName || inspectingProject.projectMap?.mainEntry?.name}</div>
                   </div>
 
                   <div className="flex justify-center">
@@ -2007,7 +2235,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                   </div>
 
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-left">
-                    {inspectingProject.projectMap.childSkills.map((c) => (
+                    {(inspectingProject.projectMap?.childSkills || []).map((c) => (
                       <div key={c.id} className="p-3 rounded-xl bg-slate-800 border border-slate-700 space-y-1">
                         <div className="text-2xs text-indigo-400 font-semibold">{c.role}</div>
                         <div className="text-xs font-bold text-slate-200 truncate">{c.displayName || c.name}</div>
@@ -2021,12 +2249,12 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                 <div className="space-y-4">
                   <div className="p-4 rounded-2xl bg-indigo-50 border border-indigo-100 space-y-1 text-xs text-indigo-900">
                     <div className="font-bold">作者目标意图：</div>
-                    <p className="leading-relaxed">{inspectingProject.runtimeIntent.authorIntent}</p>
+                    <p className="leading-relaxed">{inspectingProject.runtimeIntent?.authorIntent}</p>
                   </div>
 
                   <div className="space-y-2">
                     <div className="text-xs font-bold text-slate-800">执行流程与交付物：</div>
-                    {inspectingProject.runtimeIntent.sequence.map((step) => (
+                    {(inspectingProject.runtimeIntent?.sequence || []).map((step) => (
                       <div key={step.stepNumber} className="p-3 rounded-xl border border-slate-200 bg-white text-xs space-y-0.5">
                         <div className="font-bold text-slate-800">{step.stepNumber}. {step.title}</div>
                         <div className="text-slate-600">{step.action}</div>
@@ -2039,7 +2267,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
               {inspectActiveTab === 'files' && (
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div className="border border-slate-200 rounded-2xl divide-y divide-slate-100 max-h-80 overflow-y-auto text-xs font-mono">
-                    {inspectingProject.originalFiles.map((file, idx) => (
+                    {(inspectingProject.originalFiles || []).map((file, idx) => (
                       <div
                         key={idx}
                         onClick={() => setInspectSelectedFile(file.path)}
@@ -2089,6 +2317,370 @@ export const SkillsView: React.FC<SkillsViewProps> = ({
                 <Play className="w-3.5 h-3.5 fill-white" />
                 <span>依此项目规划执行</span>
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Full-Process Visual Audit & Log Modal */}
+      {isVisualLogOpen && visualLogData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-xs">
+          <div className="bg-white rounded-3xl max-w-5xl w-full max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-50/50">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 rounded-xl bg-purple-100 text-purple-700">
+                    <Activity className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                      <span>全方位全流程可视化执行日志</span>
+                      <span
+                        className={`text-2xs font-mono px-2 py-0.5 rounded-full ${
+                          visualLogData.run?.status === 'COMPLETED' || visualLogData.run?.status === 'completed'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : visualLogData.run?.status === 'FAILED' || visualLogData.run?.status === 'failed'
+                            ? 'bg-rose-100 text-rose-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}
+                      >
+                        {visualLogData.run?.status || 'EXECUTING'}
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-500 font-mono mt-0.5">
+                      Run ID: {visualLogData.run?.runId} · 基准: {visualLogData.run?.researchCutoff || '2026-09-24'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Action Buttons Toolbar */}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => handleDownloadLogJson(visualLogData.run?.runId)}
+                  className="px-3.5 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold flex items-center gap-1.5 transition-all"
+                  title="下载完整全流程运行日志 (JSON 格式)"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>下载完整 JSON</span>
+                </button>
+
+                <button
+                  onClick={() => handleDownloadLogText(visualLogData.run?.runId)}
+                  className="px-3.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-all"
+                  title="下载诊断与追溯文本日志 (TXT 格式)"
+                >
+                  <Download className="w-3.5 h-3.5 text-slate-500" />
+                  <span>下载 TXT 诊断日志</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(JSON.stringify(visualLogData, null, 2));
+                    setSuccessMessage('全流程日志 JSON 已复制到剪贴板！');
+                  }}
+                  className="p-2 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-600 transition-all"
+                  title="复制原始 JSON 到剪贴板"
+                >
+                  <Copy className="w-4 h-4" />
+                </button>
+
+                <button
+                  onClick={() => setIsVisualLogOpen(false)}
+                  className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-all"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Metrics Bar */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 p-4 bg-slate-100/60 border-b border-slate-200 text-xs">
+              <div className="p-3 bg-white rounded-xl border border-slate-200">
+                <div className="text-2xs text-slate-400 font-medium">执行耗时 (Duration)</div>
+                <div className="text-sm font-bold text-slate-800 font-mono mt-0.5">
+                  {visualLogData.metrics?.totalDurationMs ? `${(visualLogData.metrics.totalDurationMs / 1000).toFixed(1)}s` : '进行中'}
+                </div>
+              </div>
+              <div className="p-3 bg-white rounded-xl border border-slate-200">
+                <div className="text-2xs text-slate-400 font-medium">执行步骤 (Steps)</div>
+                <div className="text-sm font-bold text-blue-600 font-mono mt-0.5">
+                  {visualLogData.metrics?.completedSteps || 0} / {visualLogData.metrics?.totalSteps || (visualLogData.steps || []).length} 完成
+                </div>
+              </div>
+              <div className="p-3 bg-white rounded-xl border border-slate-200">
+                <div className="text-2xs text-slate-400 font-medium">真实工具/模型轨迹</div>
+                <div className="text-sm font-bold text-purple-600 font-mono mt-0.5">
+                  {visualLogData.metrics?.totalTraces || (visualLogData.traces || []).length} 次记录
+                </div>
+              </div>
+              <div className="p-3 bg-white rounded-xl border border-slate-200">
+                <div className="text-2xs text-slate-400 font-medium">产出物总线 (Artifacts)</div>
+                <div className="text-sm font-bold text-emerald-600 font-mono mt-0.5">
+                  {visualLogData.metrics?.totalArtifacts || (visualLogData.artifacts || []).length} 项结构化产出
+                </div>
+              </div>
+              <div className="p-3 bg-white rounded-xl border border-slate-200 col-span-2 md:col-span-1">
+                <div className="text-2xs text-slate-400 font-medium">AI 模型与介入验证</div>
+                <div className="text-xs font-bold text-slate-800 truncate font-mono mt-0.5" title={visualLogData.metrics?.modelNames?.join(', ') || 'Gemini 真实推理'}>
+                  {visualLogData.metrics?.modelNames?.[0] || 'gemini-2.5-flash'}
+                </div>
+              </div>
+            </div>
+
+            {/* Tab Controls */}
+            <div className="flex items-center justify-between px-6 pt-3 border-b border-slate-200 bg-white">
+              <div className="flex items-center gap-2">
+                {[
+                  { id: 'timeline', label: '时序瀑布流', icon: Clock },
+                  { id: 'steps', label: '执行步骤全景', icon: Layers },
+                  { id: 'traces', label: '真实工具与模型轨迹', icon: Activity },
+                  { id: 'artifacts', label: '产出物详情', icon: Database },
+                  { id: 'raw', label: '原始 JSON 日志', icon: Code },
+                ].map((tab) => {
+                  const Icon = tab.icon;
+                  const isActive = activeLogTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      onClick={() => setActiveLogTab(tab.id as any)}
+                      className={`px-3 py-2 text-xs font-bold flex items-center gap-1.5 border-b-2 transition-all ${
+                        isActive
+                          ? 'border-purple-600 text-purple-700'
+                          : 'border-transparent text-slate-500 hover:text-slate-800'
+                      }`}
+                    >
+                      <Icon className="w-3.5 h-3.5" />
+                      <span>{tab.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Status Filter */}
+              <div className="flex items-center gap-1.5 pb-2 text-xs text-slate-500">
+                <span>过滤:</span>
+                {(['all', 'model', 'tool', 'error'] as const).map((flt) => (
+                  <button
+                    key={flt}
+                    onClick={() => setVisualLogFilter(flt)}
+                    className={`px-2 py-0.5 rounded-lg text-2xs font-semibold capitalize transition-all ${
+                      visualLogFilter === flt
+                        ? 'bg-slate-800 text-white'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    {flt === 'all' ? '全部' : flt === 'model' ? 'AI 推理' : flt === 'tool' ? '工具调用' : '异常'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 overflow-y-auto flex-1 text-xs space-y-4 bg-slate-50/30">
+              {/* Tab: Timeline */}
+              {activeLogTab === 'timeline' && (
+                <div className="space-y-3">
+                  {(visualLogData.timeline || []).length === 0 ? (
+                    <div className="py-12 text-center text-slate-400">暂无时间线事件记录</div>
+                  ) : (
+                    <div className="relative border-l-2 border-slate-200 ml-4 pl-5 space-y-4">
+                      {(visualLogData.timeline || [])
+                        .filter((event: any) => {
+                          if (visualLogFilter === 'model') return event.type?.includes('model') || event.details?.action === 'model';
+                          if (visualLogFilter === 'tool') return event.type?.includes('tool') || event.type?.includes('browser');
+                          if (visualLogFilter === 'error') return event.status === 'failed' || event.type?.includes('error');
+                          return true;
+                        })
+                        .map((event: any, idx: number) => (
+                          <div key={idx} className="relative group">
+                            <div
+                              className={`absolute -left-[27px] top-1.5 w-3.5 h-3.5 rounded-full border-2 border-white shadow-xs ${
+                                event.status === 'completed' || event.type?.includes('end')
+                                  ? 'bg-emerald-500'
+                                  : event.status === 'failed'
+                                  ? 'bg-rose-500'
+                                  : 'bg-purple-500'
+                              }`}
+                            />
+                            <div className="p-3.5 bg-white rounded-2xl border border-slate-200 shadow-2xs hover:border-purple-300 transition-all space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <span className="font-bold text-slate-800 flex items-center gap-1.5">
+                                  <span>{event.title}</span>
+                                  {event.type && (
+                                    <span className="text-2xs font-mono px-2 py-0.5 rounded-md bg-slate-100 text-slate-600">
+                                      {event.type}
+                                    </span>
+                                  )}
+                                </span>
+                                <span className="text-2xs font-mono text-slate-400">
+                                  {event.timestamp ? new Date(event.timestamp).toLocaleTimeString('zh-CN') : ''}
+                                  {event.durationMs ? ` (${event.durationMs}ms)` : ''}
+                                </span>
+                              </div>
+                              {event.details && (
+                                <pre className="text-2xs font-mono p-2 rounded-xl bg-slate-50 text-slate-700 whitespace-pre-wrap max-h-36 overflow-y-auto">
+                                  {typeof event.details === 'string'
+                                    ? event.details
+                                    : JSON.stringify(event.details, null, 2)}
+                                </pre>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Tab: Steps */}
+              {activeLogTab === 'steps' && (
+                <div className="space-y-3">
+                  {(visualLogData.steps || []).map((step: any, idx: number) => (
+                    <div
+                      key={step.stepId || idx}
+                      className="p-4 bg-white rounded-2xl border border-slate-200 shadow-2xs space-y-3"
+                    >
+                      <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded-lg bg-purple-50 text-purple-700 font-mono font-bold text-2xs">
+                            Step #{idx + 1}
+                          </span>
+                          <span className="font-bold text-slate-800">{step.title}</span>
+                          <span className="text-2xs font-mono text-slate-400">({step.stepId})</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-2xs font-semibold ${
+                              step.status === 'completed'
+                                ? 'bg-emerald-100 text-emerald-700'
+                                : step.status === 'failed'
+                                ? 'bg-rose-100 text-rose-700'
+                                : 'bg-amber-100 text-amber-700'
+                            }`}
+                          >
+                            {step.status}
+                          </span>
+                          {step.completedAt && step.startedAt && (
+                            <span className="text-2xs text-slate-400 font-mono">
+                              耗时: {new Date(step.completedAt).getTime() - new Date(step.startedAt).getTime()}ms
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-2xs font-mono">
+                        <div>
+                          <div className="font-bold text-slate-600 mb-1">输入参数 (Input):</div>
+                          <pre className="p-2.5 rounded-xl bg-slate-50 border border-slate-150 max-h-40 overflow-y-auto text-slate-700 whitespace-pre-wrap">
+                            {JSON.stringify(step.input, null, 2)}
+                          </pre>
+                        </div>
+                        <div>
+                          <div className="font-bold text-slate-600 mb-1">执行产出 (Output):</div>
+                          <pre className="p-2.5 rounded-xl bg-slate-50 border border-slate-150 max-h-40 overflow-y-auto text-emerald-800 whitespace-pre-wrap">
+                            {typeof step.output === 'string'
+                              ? step.output
+                              : JSON.stringify(step.output, null, 2)}
+                          </pre>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Tab: Traces */}
+              {activeLogTab === 'traces' && (
+                <div className="space-y-2.5">
+                  {(visualLogData.traces || []).map((tr: any, idx: number) => (
+                    <div
+                      key={tr.traceId || idx}
+                      className="p-3.5 bg-white rounded-2xl border border-slate-200 shadow-2xs space-y-2 font-mono text-2xs"
+                    >
+                      <div className="flex items-center justify-between text-slate-800">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold px-2 py-0.5 rounded bg-blue-50 text-blue-700">
+                            [{tr.actionType}] {tr.toolName || tr.skillName || 'Action'}
+                          </span>
+                          <span className="text-slate-400">ID: {tr.traceId}</span>
+                        </div>
+                        <span className="text-purple-600 font-bold">{tr.durationMs}ms</span>
+                      </div>
+
+                      {tr.inputSnippet && (
+                        <div>
+                          <span className="text-slate-400">调用入参: </span>
+                          <span className="text-slate-700 break-all">{tr.inputSnippet}</span>
+                        </div>
+                      )}
+
+                      {tr.outputSnippet && (
+                        <div>
+                          <span className="text-slate-400">执行产出: </span>
+                          <span className="text-emerald-700 break-all">{tr.outputSnippet}</span>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Tab: Artifacts */}
+              {activeLogTab === 'artifacts' && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {(visualLogData.artifacts || []).map((art: any, idx: number) => (
+                    <div
+                      key={art.id || idx}
+                      className="p-4 bg-white rounded-2xl border border-slate-200 shadow-2xs space-y-2 text-xs"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-slate-800">{art.name}</span>
+                        <span className="text-2xs font-mono px-2 py-0.5 rounded bg-slate-100 text-slate-600">
+                          {art.type}
+                        </span>
+                      </div>
+                      <div className="text-2xs text-slate-400 font-mono">
+                        来自: {art.stepId} · 大小: {art.size} 字节 · 创建时间: {art.createdAt}
+                      </div>
+                      <div className="p-2.5 rounded-xl bg-slate-50 font-mono text-2xs text-slate-700 max-h-36 overflow-y-auto whitespace-pre-wrap">
+                        {typeof art.content === 'string'
+                          ? art.content
+                          : JSON.stringify(art.content, null, 2)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Tab: Raw JSON */}
+              {activeLogTab === 'raw' && (
+                <div className="p-4 rounded-2xl bg-slate-900 text-slate-200 font-mono text-xs leading-relaxed max-h-[500px] overflow-y-auto whitespace-pre-wrap selection:bg-purple-500">
+                  {JSON.stringify(visualLogData, null, 2)}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 bg-white border-t border-slate-200 flex items-center justify-between text-xs">
+              <span className="text-slate-400 font-mono">
+                Universal Skill Runtime · 事实追溯与全流程可视化审计引擎
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleDownloadLogJson(visualLogData.run?.runId)}
+                  className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-bold flex items-center gap-1.5 transition-all shadow-xs"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>下载此日志</span>
+                </button>
+                <button
+                  onClick={() => setIsVisualLogOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold transition-all"
+                >
+                  关闭
+                </button>
+              </div>
             </div>
           </div>
         </div>

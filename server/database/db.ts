@@ -468,9 +468,25 @@ export class SkillRuntimeDatabase {
     }));
   }
 
+  private ensureRunExists(runId: string): void {
+    if (!runId) return;
+    try {
+      const stmt = this.db.prepare('SELECT run_id FROM execution_runs WHERE run_id = ?');
+      const existing = stmt.get(runId);
+      if (!existing) {
+        const insert = this.db.prepare(`
+          INSERT INTO execution_runs (run_id, task, project_id, plan_id, status, started_at)
+          VALUES (?, 'Execution Run', 'default', ?, 'EXECUTING', ?)
+        `);
+        insert.run(runId, `plan_${runId}`, new Date().toISOString());
+      }
+    } catch {}
+  }
+
   // ==================== Execution Step Persistence ====================
 
   saveExecutionStep(step: ExecutionStep, runId: string): void {
+    this.ensureRunExists(runId);
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO execution_steps (
         step_id, run_id, skill_id, skill_name, title, action, status,
@@ -519,6 +535,7 @@ export class SkillRuntimeDatabase {
   // ==================== Execution Trace Persistence ====================
 
   saveExecutionTrace(trace: ExecutionTrace): void {
+    this.ensureRunExists(trace.runId);
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO execution_traces (
         trace_id, run_id, step_id, action, tool, status,
@@ -563,6 +580,7 @@ export class SkillRuntimeDatabase {
   // ==================== Artifact Persistence ====================
 
   saveArtifact(artifact: Artifact, runId: string): void {
+    this.ensureRunExists(runId);
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO artifacts (
         artifact_id, run_id, type, name, producer_step_id,
@@ -612,6 +630,7 @@ export class SkillRuntimeDatabase {
   // ==================== Evidence Reference Persistence ====================
 
   saveEvidenceRef(evidence: EvidenceRef, runId: string): void {
+    this.ensureRunExists(runId);
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO evidence_refs (
         evidence_id, run_id, source, url, title, published_at,

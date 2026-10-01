@@ -148,11 +148,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             onClick={() => onNavigate('skills')}
             className="text-xs text-blue-600 hover:text-blue-800 font-medium"
           >
-            查看全部技能 ({skills.length})
+            查看全部技能 ({(skills || []).length})
           </button>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {skills.slice(0, 3).map((skill) => (
+          {(skills || []).slice(0, 3).map((skill) => (
             <div
               key={skill.id}
               className="p-4 rounded-xl border border-slate-200 hover:border-blue-400 bg-slate-50/50 hover:bg-white transition-all flex flex-col justify-between"
@@ -198,7 +198,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </button>
         </div>
 
-        {recentTasks.length === 0 ? (
+        {(!recentTasks || recentTasks.length === 0) ? (
           <div className="text-center py-10 text-slate-400 text-xs">
             当前工作区暂无历史任务。点击上方【新建任务】开始执行。
           </div>
@@ -216,7 +216,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {recentTasks.slice(0, 5).map((task) => (
+                {(recentTasks || []).slice(0, 5).map((task) => (
                   <tr key={task.id} className="hover:bg-slate-50/80 transition-colors">
                     <td className="py-3 px-3 font-medium text-slate-900 max-w-xs truncate">
                       {task.title}
@@ -262,7 +262,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       )}
                     </td>
                     <td className="py-3 px-3 text-slate-600">
-                      {task.outputFiles.length > 0 ? (
+                      {(task.outputFiles || []).length > 0 ? (
                         <span className="flex items-center gap-1 text-[11px] text-blue-600 font-medium">
                           <FileText className="w-3 h-3" />
                           {task.outputFiles[0].name}
@@ -281,7 +281,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     </td>
                     <td className="py-3 px-3 text-right">
                       <div className="flex items-center justify-end gap-1.5">
-                        {(task.finalResult || task.outputFiles.length > 0) && (
+                        {(task.finalResult || (task.outputFiles || []).length > 0) && (
                           <div className="flex items-center gap-1 mr-1">
                             <button
                               onClick={async (e) => {

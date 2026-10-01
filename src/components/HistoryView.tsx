@@ -45,7 +45,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
     }
   };
 
-  const filteredTasks = tasks.filter((t) => {
+  const filteredTasks = (tasks || []).filter((t) => {
     const matchesText =
       t.title.toLowerCase().includes(filterText.toLowerCase()) ||
       t.prompt.toLowerCase().includes(filterText.toLowerCase()) ||

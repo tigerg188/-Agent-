@@ -130,7 +130,7 @@ export const AutomationView: React.FC<AutomationViewProps> = ({
 
       {/* Automation Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        {automations.map((item) => (
+        {(automations || []).map((item) => (
           <div
             key={item.id}
             className={`bg-white rounded-2xl border p-5 shadow-xs flex flex-col justify-between transition-all ${
@@ -286,7 +286,7 @@ export const AutomationView: React.FC<AutomationViewProps> = ({
                   onChange={(e) => setFormData({ ...formData, skillId: e.target.value })}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-hidden"
                 >
-                  {skills.map((s) => (
+                  {(skills || []).map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.displayName || s.name} ({s.category || 'Skill'})
                     </option>
@@ -362,10 +362,10 @@ export const AutomationView: React.FC<AutomationViewProps> = ({
             </div>
 
             <div className="p-6 overflow-y-auto space-y-4 flex-1 text-xs">
-              {selectedLogsTask.executionLogs.length === 0 ? (
+              {(!selectedLogsTask.executionLogs || selectedLogsTask.executionLogs.length === 0) ? (
                 <div className="text-center py-8 text-slate-400">暂无执行历史日志记录。</div>
               ) : (
-                selectedLogsTask.executionLogs.map((log) => (
+                (selectedLogsTask.executionLogs || []).map((log) => (
                   <div key={log.id} className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
                     <div className="flex items-center justify-between text-[11px]">
                       <span className="font-semibold text-slate-800">

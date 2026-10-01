@@ -61,7 +61,7 @@ export const Header: React.FC<HeaderProps> = ({
             onChange={(e) => onSelectWorkspace(e.target.value)}
             className="bg-transparent text-xs font-medium text-slate-800 pr-4 pl-1 py-1 focus:outline-hidden cursor-pointer"
           >
-            {workspaces.map((ws) => (
+            {(workspaces || []).map((ws) => (
               <option key={ws.id} value={ws.id}>
                 [{ws.code}] {ws.name}
               </option>

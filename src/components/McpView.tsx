@@ -139,7 +139,7 @@ export const McpView: React.FC<McpViewProps> = ({
 
       {/* Server Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        {servers.map((server) => {
+        {(servers || []).map((server) => {
           const isReady = server.status === 'ready';
           const isUnsupported = server.status === 'unsupported_in_env';
           const isNeedsConfig = server.status === 'needs_config';
@@ -202,13 +202,13 @@ export const McpView: React.FC<McpViewProps> = ({
                 {/* Tool List Preview */}
                 <div className="space-y-1.5 mb-4">
                   <div className="text-[11px] font-semibold text-slate-700 flex items-center justify-between">
-                    <span>暴露工具清单 ({server.tools.length})：</span>
+                    <span>暴露工具清单 ({(server.tools || []).length})：</span>
                   </div>
-                  {server.tools.length === 0 ? (
+                  {(!server.tools || server.tools.length === 0) ? (
                     <div className="text-[11px] text-slate-400 italic">暂无工具声明</div>
                   ) : (
                     <div className="flex flex-wrap gap-1.5">
-                      {server.tools.map((t) => (
+                      {(server.tools || []).map((t) => (
                         <button
                           key={t.name}
                           onClick={() => {

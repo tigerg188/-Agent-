@@ -1,3 +1,4 @@
+import fs from 'fs';
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { BrowserCommandParams, BrowserCommandResult } from '../types';
 
@@ -27,6 +28,19 @@ export class BrowserAdapter {
     this.isInitializing = true;
     try {
       if (!this.browser) {
+        let exePath = '';
+        try {
+          exePath = chromium.executablePath();
+        } catch {
+          // Ignore
+        }
+
+        // If executable path is defined but binary does not exist on disk, gracefully fall back
+        if (exePath && !fs.existsSync(exePath)) {
+          this.useRealBrowser = false;
+          return;
+        }
+
         this.browser = await chromium.launch({
           headless: true,
           args: [
@@ -52,8 +66,8 @@ export class BrowserAdapter {
       this.pageTitle = 'Personal Agent Browser';
       console.log('[BrowserAdapter] Playwright Chromium engine successfully initialized');
     } catch (launchErr: any) {
-      console.warn(
-        '[BrowserAdapter] Playwright Chromium launch failed, engaging Universal Headless Web Engine:',
+      console.log(
+        '[BrowserAdapter] Playwright Chromium headless mode switched to Universal Web Engine:',
         launchErr?.message
       );
       this.useRealBrowser = false;
@@ -77,7 +91,7 @@ export class BrowserAdapter {
       try {
         return await this.executePlaywrightCommand(params);
       } catch (err: any) {
-        console.warn('[BrowserAdapter] Playwright command error, failing over to Web Engine:', err.message);
+        console.log('[BrowserAdapter] Playwright command note, failing over to Web Engine:', err.message);
         return await this.executeHttpFallback(params);
       }
     } else {
@@ -270,7 +284,7 @@ export class BrowserAdapter {
         ],
       };
     } catch (netErr: any) {
-      console.warn('[BrowserAdapter] HTTP fetch warning:', netErr.message);
+      console.log('[BrowserAdapter] HTTP fetch note:', netErr.message);
       if (!content) {
         content = `已导航至目标页面：${targetUrl}\n状态：网络适配已建立，正在解析结构化数据。`;
       }

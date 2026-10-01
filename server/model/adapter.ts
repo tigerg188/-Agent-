@@ -25,7 +25,8 @@ function isTransientOrUnavailable(err: any): boolean {
   if (!err) return false;
   const status = err.status || err.code || err.statusCode;
   const msg = (err.message || '').toLowerCase();
-  const raw = JSON.stringify(err).toLowerCase();
+  const str = String(err).toLowerCase();
+  const errorDetails = JSON.stringify(err.errorDetails || err.statusDetails || {}).toLowerCase();
 
   return (
     status === 503 ||
@@ -38,18 +39,29 @@ function isTransientOrUnavailable(err: any): boolean {
     msg.includes('unavailable') ||
     msg.includes('quota') ||
     msg.includes('rate limit') ||
-    raw.includes('503') ||
-    raw.includes('unavailable')
+    msg.includes('rate_limit') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('overloaded') ||
+    msg.includes('exceeded your current quota') ||
+    str.includes('503') ||
+    str.includes('429') ||
+    str.includes('resource_exhausted') ||
+    str.includes('quota') ||
+    str.includes('high demand') ||
+    errorDetails.includes('503') ||
+    errorDetails.includes('resource_exhausted')
   );
 }
 
 /**
  * GeminiModelAdapter implements the IModelAdapter interface using the official @google/genai SDK.
- * Features intelligent model fallback across Gemini 3.x and 2.5 models with a circuit-breaker
- * cooldown mechanism that seamlessly bypasses models experiencing temporary 503 high-demand surges.
+ * Features intelligent model fallback across Gemini 2.5 and 3.x models with a circuit-breaker
+ * cooldown mechanism that seamlessly bypasses models experiencing temporary 503 high-demand or quota surges.
  */
 export class GeminiModelAdapter implements IModelAdapter {
-  public readonly name = 'gemini-3.8-flash';
+  public readonly name = 'gemini-2.5-flash';
+  public lastUsedModel: string = 'gemini-2.5-flash';
+  public lastUsedLatencyMs: number = 0;
   private client: GoogleGenAI | null = null;
 
   constructor() {
@@ -86,10 +98,10 @@ export class GeminiModelAdapter implements IModelAdapter {
 
   async generateText(prompt: string, options?: ModelAdapterOptions): Promise<string> {
     const client = this.getClient();
-    const primaryModel = options?.modelName || 'gemini-3.8-flash';
+    const primaryModel = options?.modelName || 'gemini-2.5-flash';
 
-    // Model fallback sequence:
-    // 1. Primary requested model (gemini-3.8-flash or custom)
+    // Model fallback sequence prioritizes high-availability stable models:
+    // 1. Primary requested model (or default gemini-2.5-flash)
     // 2. High-availability Gemini 2.5 Flash
     // 3. Ultra-low latency Gemini 3.1 Flash Lite
     // 4. Gemini 3.8 Flash
@@ -106,6 +118,7 @@ export class GeminiModelAdapter implements IModelAdapter {
     let lastError: any = null;
 
     for (const model of candidateModels) {
+      const callStart = Date.now();
       try {
         const response = await client.models.generateContent({
           model,
@@ -118,6 +131,8 @@ export class GeminiModelAdapter implements IModelAdapter {
         });
 
         if (response.text) {
+          this.lastUsedModel = model;
+          this.lastUsedLatencyMs = Date.now() - callStart;
           // Model succeeded: if it was previously cooling, clear the cooldown
           if (modelCooldowns.has(model)) {
             modelCooldowns.delete(model);
@@ -130,8 +145,8 @@ export class GeminiModelAdapter implements IModelAdapter {
 
         if (isTransient) {
           // Put this model in cooldown so subsequent requests don't waste time on it
-          modelCooldowns.set(model, Date.now() + 45000);
-          console.log(`[GeminiAdapter] Model "${model}" temporarily busy/quota reached, automatically routing to alternative model...`);
+          modelCooldowns.set(model, Date.now() + 60000);
+          console.log(`[GeminiAdapter] Model "${model}" temporarily busy/quota reached (${err.message?.slice(0, 100)}), automatically routing to alternative model...`);
           // Immediately try the next candidate model
           continue;
         }
@@ -160,7 +175,7 @@ export class GeminiModelAdapter implements IModelAdapter {
       }
       return JSON.parse(cleaned) as T;
     } catch (err: any) {
-      console.error('Failed to parse structured JSON from model:', raw);
+      console.error('Failed to parse structured JSON from model:', raw.slice(0, 300));
       throw new Error(`Model returned invalid JSON: ${err.message}`);
     }
   }

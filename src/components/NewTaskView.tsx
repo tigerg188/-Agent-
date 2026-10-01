@@ -196,7 +196,7 @@ export const NewTaskView: React.FC<NewTaskViewProps> = ({
                 onChange={(e) => setSelectedWorkspace(e.target.value)}
                 className="w-full text-xs bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
               >
-                {workspaces.map((ws) => (
+                {(workspaces || []).map((ws) => (
                   <option key={ws.id} value={ws.id}>
                     [{ws.code}] {ws.name}
                   </option>
@@ -243,11 +243,11 @@ export const NewTaskView: React.FC<NewTaskViewProps> = ({
             {/* Workspace existing files selector */}
             <div className="border border-slate-200 rounded-xl p-3 bg-slate-50/50">
               <div className="text-[11px] text-slate-500 mb-2">工作区中可用资料（勾选作为本任务上下文）：</div>
-              {workspaceFiles.length === 0 ? (
+              {(!workspaceFiles || workspaceFiles.length === 0) ? (
                 <div className="text-xs text-slate-400 italic">当前工作区暂无上传文件。</div>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {workspaceFiles.map((file) => {
+                  {(workspaceFiles || []).map((file) => {
                     const isAttached = attachedFiles.includes(file.name);
                     return (
                       <div
@@ -334,7 +334,7 @@ export const NewTaskView: React.FC<NewTaskViewProps> = ({
                   className="w-full text-xs bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
                 >
                   <optgroup label="核心与总路由技能（推荐）">
-                    {skills
+                    {(skills || [])
                       .filter((s) => !s.parentSkillId)
                       .map((s) => (
                         <option key={s.id} value={s.id}>
@@ -342,9 +342,9 @@ export const NewTaskView: React.FC<NewTaskViewProps> = ({
                         </option>
                       ))}
                   </optgroup>
-                  {skills.some((s) => s.role === 'specialty' || s.parentSkillId) && (
+                  {(skills || []).some((s) => s.role === 'specialty' || s.parentSkillId) && (
                     <optgroup label="技能包下属专项分支（精细化单项执行）">
-                      {skills
+                      {(skills || [])
                         .filter((s) => s.role === 'specialty' || s.parentSkillId)
                         .map((s) => (
                           <option key={s.id} value={s.id}>
@@ -403,7 +403,7 @@ export const NewTaskView: React.FC<NewTaskViewProps> = ({
               </div>
             ) : (
               <div className="space-y-2">
-                {mcpServers.map((server) => (
+                {(mcpServers || []).map((server) => (
                   <label
                     key={server.id}
                     className="flex items-center justify-between p-2 rounded-lg border border-slate-200 bg-slate-50 text-xs cursor-pointer hover:bg-slate-100"

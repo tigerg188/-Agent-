@@ -324,11 +324,15 @@ export const api = {
     return json.data;
   },
 
-  getTaskDownloadUrl(id: string, format: 'md' | 'docx' = 'md'): string {
+  getTaskDownloadUrl(id: string, format: 'md' | 'docx' | 'json' | 'txt' | 'log' = 'md'): string {
     return `${API_BASE}/tasks/${id}/download?format=${format}`;
   },
 
-  async downloadTaskResult(id: string, format: 'md' | 'docx' = 'md', fallbackFilename?: string): Promise<void> {
+  async downloadTaskResult(
+    id: string,
+    format: 'md' | 'docx' | 'json' | 'txt' | 'log' = 'md',
+    fallbackFilename?: string
+  ): Promise<void> {
     const url = this.getTaskDownloadUrl(id, format);
     const res = await fetch(url);
     if (!res.ok) {

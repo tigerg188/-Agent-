@@ -29,6 +29,7 @@ export interface StepLog {
   id: string;
   stage:
     | 'task_analysis'
+    | 'ai_reasoning'
     | 'skill_selected'
     | 'skill_loaded'
     | 'mcp_selected'

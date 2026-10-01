@@ -280,7 +280,7 @@ router.get('/skills/runtime/runs', (req: Request, res: Response) => {
   res.json({ success: true, data: runs });
 });
 
-// Section 31 & 32: Get single run with Traces, Artifacts, Evidence
+// Section 31 & 32: Get single run with Traces, Artifacts, Evidence, and Synthesis Report
 router.get('/skills/runtime/runs/:runId', (req: Request, res: Response) => {
   const { runId } = req.params;
   const run = globalSkillDb.getExecutionRun(runId);
@@ -288,10 +288,26 @@ router.get('/skills/runtime/runs/:runId', (req: Request, res: Response) => {
     return res.status(404).json({ success: false, error: '未找到对应的执行记录' });
   }
 
-  const traces = globalSkillDb.getExecutionTraces(runId);
-  const artifacts = globalSkillDb.getArtifacts(runId);
-  const evidence = globalSkillDb.getEvidenceRefs(runId);
+  const dbTraces = globalSkillDb.getExecutionTraces(runId);
+  const memTraces = globalExecutionTraceManager.getTracesByRunId(runId);
+  const traces = dbTraces.length >= memTraces.length ? dbTraces : memTraces;
+
+  const dbArtifacts = globalSkillDb.getArtifacts(runId);
+  const memArtifacts = globalArtifactBus.getArtifactsByRunId(runId);
+  const artifacts = dbArtifacts.length >= memArtifacts.length ? dbArtifacts : memArtifacts;
+
+  const dbEvidence = globalSkillDb.getEvidenceRefs(runId);
+  const memEvidence = globalArtifactBus.getEvidenceByRunId(runId);
+  const evidence = dbEvidence.length >= memEvidence.length ? dbEvidence : memEvidence;
+
   const steps = globalSkillDb.getExecutionSteps(runId);
+
+  // Extract final markdown report if present
+  let finalReportMarkdown: string | undefined;
+  const finalArt = artifacts.find((a) => a.type === 'FinalReportArtifact');
+  if (finalArt && (finalArt.content as any)?.markdown) {
+    finalReportMarkdown = (finalArt.content as any).markdown;
+  }
 
   res.json({
     success: true,
@@ -301,8 +317,76 @@ router.get('/skills/runtime/runs/:runId', (req: Request, res: Response) => {
       traces,
       artifacts,
       evidence,
+      finalReportMarkdown,
     },
   });
+});
+
+// Download full execution log as structured JSON or Log file
+router.get('/skills/runtime/runs/:runId/download', (req: Request, res: Response) => {
+  const { runId } = req.params;
+  const format = (req.query.format as string) || 'json';
+  const run = globalSkillDb.getExecutionRun(runId);
+  if (!run) {
+    return res.status(404).json({ success: false, error: '未找到执行记录' });
+  }
+
+  const traces = globalSkillDb.getExecutionTraces(runId);
+  const artifacts = globalSkillDb.getArtifacts(runId);
+  const evidence = globalSkillDb.getEvidenceRefs(runId);
+  const steps = globalSkillDb.getExecutionSteps(runId);
+
+  let finalReportMarkdown = '';
+  const finalArt = artifacts.find((a) => a.type === 'FinalReportArtifact');
+  if (finalArt && (finalArt.content as any)?.markdown) {
+    finalReportMarkdown = (finalArt.content as any).markdown;
+  }
+
+  const logPayload = {
+    exportedAt: new Date().toISOString(),
+    system: 'Universal Heterogeneous Skill Runtime V0.3.2',
+    run,
+    steps,
+    traces,
+    artifacts,
+    evidence,
+    finalReportMarkdown,
+  };
+
+  if (format === 'md' && finalReportMarkdown) {
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="Report-${runId.slice(0, 16)}.md"`);
+    return res.send(finalReportMarkdown);
+  }
+
+  if (format === 'log') {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="Execution-Trace-${runId.slice(0, 16)}.log"`);
+    const logLines = [
+      `================================================================================`,
+      `UNIVERSAL SKILL RUNTIME - END-TO-END EXECUTION LOG`,
+      `Run ID: ${run.runId}`,
+      `Task: ${run.task}`,
+      `Cutoff: ${run.researchCutoff || 'N/A'}`,
+      `Status: ${run.status}`,
+      `Started: ${run.startedAt}`,
+      `Finished: ${run.finishedAt || 'N/A'}`,
+      `================================================================================\n`,
+      `[EXECUTION STEPS (${steps.length})]`,
+      ...steps.map((s, idx) => `[Step ${idx + 1}] (${s.status.toUpperCase()}) ${s.stepId} - ${s.title}\n  Action: ${s.action} | Expected: ${s.expectedOutput}\n`),
+      `\n[TRACE AUDIT LOG (${traces.length})]`,
+      ...traces.map((t, idx) => `[Trace ${idx + 1}] [${t.status}] ${t.action} (${t.tool || 'Default'})\n  Duration: ${t.durationMs}ms | Time: ${t.timestamp}\n  Input: ${JSON.stringify(t.input)}\n  Output: ${JSON.stringify(t.output)}\n`),
+      `\n[ARTIFACTS REGISTERED (${artifacts.length})]`,
+      ...artifacts.map((a, idx) => `[Artifact ${idx + 1}] ${a.name} (${a.type})\n  ID: ${a.artifactId} | Producer: ${a.producerStepId} (${a.producerSkillName || 'Core'})\n`),
+      `\n[EVIDENCE REFS (${evidence.length})]`,
+      ...evidence.map((e, idx) => `[Evidence ${idx + 1}] [${e.dataType}] ${e.source} (${e.dataDate})\n  Claim: ${e.claim}\n  URL: ${e.url || 'N/A'}\n`),
+    ];
+    return res.send(logLines.join('\n'));
+  }
+
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="Execution-Log-${runId.slice(0, 16)}.json"`);
+  res.send(JSON.stringify(logPayload, null, 2));
 });
 
 // Section 30: Trace single artifact upstream and evidence
@@ -642,6 +726,95 @@ router.get('/tasks/:id/download', async (req: Request, res: Response) => {
 
   const format = String(req.query.format || 'md').toLowerCase();
   const asciiSafeBase = baseFilename.replace(/[^\x20-\x7E]/g, '_').trim() || 'Agent-Report';
+
+  if (format === 'json') {
+    const logData = {
+      taskInfo: {
+        id: task.id,
+        title: task.title,
+        prompt: task.prompt,
+        model: task.model,
+        workspaceId: task.workspaceId,
+        status: task.status,
+        executionMode: task.executionMode,
+        skillMode: task.skillMode,
+        selectedSkill: task.selectedSkill,
+        selectedMcps: task.selectedMcps,
+        attachedFiles: task.attachedFiles,
+        createdAt: task.createdAt,
+        completedAt: task.completedAt,
+        durationMs: task.durationMs,
+      },
+      verificationReport: task.verificationReport,
+      browserSession: task.browserSession,
+      timelineSteps: task.steps,
+      outputFiles: (task.outputFiles || []).map((f) => ({
+        name: f.name,
+        size: f.size,
+        mimeType: f.mimeType,
+        path: f.path,
+      })),
+      finalResult: fullContent,
+    };
+
+    const jsonStr = JSON.stringify(logData, null, 2);
+    const filename = `${baseFilename}-full-audit-log.json`;
+    const encodedFilename = encodeURIComponent(filename);
+
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${asciiSafeBase}-audit-log.json"; filename*=UTF-8''${encodedFilename}`);
+    return res.send(jsonStr);
+  }
+
+  if (format === 'txt' || format === 'log') {
+    const textLog = `================================================================================
+PERSONAL AGENT WORKBENCH - FULL EXECUTION AUDIT LOG
+================================================================================
+Task ID       : ${task.id}
+Title         : ${task.title}
+Workspace     : ${task.workspaceId}
+Model Engine  : ${task.model} (Official Google GenAI SDK)
+Execution Mode: ${task.executionMode}
+Skill Setting : ${task.skillMode === 'forced' ? '强制指定 Skill' : '自动识别 Skill'} (${task.selectedSkill?.name || '通用 Agent'})
+Status        : ${task.status.toUpperCase()}
+Start Time    : ${task.createdAt}
+Completed At  : ${task.completedAt || 'N/A'}
+Total Duration: ${task.durationMs ? `${task.durationMs}ms (${(task.durationMs / 1000).toFixed(2)}s)` : 'N/A'}
+
+--------------------------------------------------------------------------------
+[CHRONOLOGICAL TIMELINE & OBSERVABLE AUDIT STEPS]
+--------------------------------------------------------------------------------
+${task.steps
+  .map(
+    (st, idx) => `[STEP ${idx + 1}] [${st.timestamp}] [${st.status.toUpperCase()}] [${st.stage}]
+Title      : ${st.title}
+Description: ${st.description}`
+  )
+  .join('\n\n')}
+
+--------------------------------------------------------------------------------
+[VERIFICATION & QUALITY CHECKLIST]
+--------------------------------------------------------------------------------
+Overall Status: ${task.verificationReport?.passed ? 'PASSED (通过)' : 'UNVERIFIED / WARNING'}
+Summary       : ${task.verificationReport?.summary || 'N/A'}
+Checks:
+${(task.verificationReport?.checks || []).map((c) => `  - [${c.passed ? 'PASS' : 'FAIL'}] ${c.name}: ${c.message}`).join('\n')}
+
+--------------------------------------------------------------------------------
+[FINAL DELIVERABLE REPORT OUTPUT]
+--------------------------------------------------------------------------------
+${fullContent}
+================================================================================
+END OF AUDIT LOG
+================================================================================
+`;
+    const filename = `${baseFilename}-audit.log`;
+    const encodedFilename = encodeURIComponent(filename);
+
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${asciiSafeBase}-audit.log"; filename*=UTF-8''${encodedFilename}`);
+    return res.send(textLog);
+  }
 
   if (format === 'docx') {
     try {

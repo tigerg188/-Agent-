@@ -612,13 +612,39 @@ ${referenceData || '（无直接网页原文，请依据专业知识与分析逻
 3. 结尾附带简短的执行自查结论。
 `;
 
+        const effectiveModel = task.model || 'gemini-2.5-flash';
+        const modelStartStep: StepLog = {
+          id: `step-ai-model-start-${Date.now()}`,
+          stage: 'ai_reasoning',
+          title: `调用 Gemini 大模型 (${effectiveModel}) 进行深度研判`,
+          description: `正在通过官方 Google GenAI SDK 发起推演推理，整合用户任务、${skill ? 'SKILL.md 规范与方法论' : '通用研判流程'} 及工具采集事实...`,
+          timestamp: new Date().toISOString(),
+          status: 'in_progress',
+        };
+        this.addStep(task, modelStartStep);
+
+        const modelStartTime = Date.now();
         generatedReport = await defaultModelAdapter.generateText(prompt, {
-          modelName: task.model,
+          modelName: effectiveModel,
           systemInstruction: '你是一个高效、严谨、只陈述客观事实的专业级个人 Agent 工作执行器。格式排版规范优美。',
           temperature: 0.3,
         });
+        const modelLatency = Date.now() - modelStartTime;
+
+        modelStartStep.status = 'success';
+        modelStartStep.title = `大模型 (${effectiveModel}) 推演完成`;
+        modelStartStep.description = `真实调用 Google GenAI API 成功。模型推理耗时 ${modelLatency}ms，生成 ${generatedReport.length} 字符结构化报告。`;
+        globalHistoryStore.saveTask(task);
       } catch (e: any) {
-        console.log('[AgentCore] Model generation using context synthesis fallback...');
+        console.log('[AgentCore] Model generation note:', e.message);
+        this.addStep(task, {
+          id: `step-ai-model-err-${Date.now()}`,
+          stage: 'ai_reasoning',
+          title: `大模型接口提示与容错接管`,
+          description: `模型调用记录: ${e.message || '网络连接或配额限制'}。已自动启用事实上下文融合引擎保障报告交付。`,
+          timestamp: new Date().toISOString(),
+          status: 'warning',
+        });
 
         // Construct a rich structured report based on real collected facts
         const factsSection = referenceData
